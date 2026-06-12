@@ -1,0 +1,11 @@
+# Face-Match Photo Sorter dependencies
+#
+# insightface pulls in onnxruntime for CPU inference. If pip can't find a
+# matching onnxruntime wheel, install it explicitly: pip install onnxruntime
+insightface==0.7.3
+onnxruntime>=1.17
+numpy>=1.24
+pillow>=10.3            # 10.3.0 fixes CVE-2024-28219 (buffer overflow in _imagingcms.c)
+pillow-heif>=0.16        # decode Apple .HEIC files (album is all HEIC)
+tqdm>=4.66               # progress bars for the long album scan
+scikit-learn>=1.3        # HDBSCAN/DBSCAN for faces.py cluster (HDBSCAN needs >=1.3)

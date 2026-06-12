@@ -1,0 +1,34 @@
+# Photo data — never commit (huge, and contains a child's face/GPS data)
+album/
+matches/
+*-matches/
+reference/
+known-positives/
+
+# Derived biometric data + generated artifacts
+reference_embeddings.npy
+scores.csv
+# whole-class face database (clustering pipeline) — every child's biometric data
+faces*.emb
+faces*.npy
+faces*.csv
+faces*.done
+clusters*.csv
+labels*.csv
+image_people*.csv
+scene*.csv
+embed_full.log
+clusters*/
+by_child*/
+query*/
+validation_*.jpg
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# macOS
+.DS_Store

@@ -1,0 +1,13 @@
+# Lint config. Run: ruff check .
+# Matches the rule set used in the startupsourcer repo, minus the single-quote
+# formatter (this codebase is double-quoted). F (pyflakes) is the high-value
+# part: unused imports, undefined names, and other real bugs.
+[lint]
+select = [
+    "F",      # Pyflakes (unused imports, undefined names, etc.)
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+]
+ignore = [
+    "E501",   # Line too long — wrapping is a judgment call here
+]
