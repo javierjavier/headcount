@@ -153,6 +153,29 @@ Single-person queries don't compound like this. So an AND query finds *most* tru
 co-appearances, not all — fine for "find photos of the two friends," but not
 exhaustive. False positives are correspondingly rarer (both must be mislabeled).
 
+## Browsing: the `serve` gallery
+
+`faces.py serve` is a presentation layer over `image_people.csv` (+ optional
+`scene.csv`): a localhost-only web app for name/time filtering and zip export,
+an alternative to fanning copies into Finder folders with `query`. It binds
+`127.0.0.1` only — the same local-only privacy stance as everything else.
+
+**Thumbnail size (`--thumb`, default 768) is deliberate — don't drop it back to
+320.** Previews are pre-rendered into `.serve_cache/` once (re-decoding each HEIC
+is the slow part; everything else is instant). The blur trap: the grid lays out
+square cells with `object-fit: cover`, which scales the image to fill by its
+*short* edge, and HiDPI/Retina screens render ~2× the CSS pixels. So a cell shown
+at 150 CSS px wants ~300 device px on its short edge, and the size slider goes to
+300 CSS px (~600 device px). A 320px-long-edge thumb (~240px short edge on a
+landscape shot) is already below that at the *default* zoom, so it upscales and
+looks soft. 768px long-edge (~576px short edge) covers the largest cell at 2×.
+The tradeoff is build time and disk (~5–6× vs 320); raise/lower to taste.
+
+The cache is **size-aware**: it records the build size in a `.serve_cache/.thumb_size`
+marker and clears + rebuilds when `--thumb` changes. Without this the per-key
+`exists()` skip would silently keep serving whatever size was built first — a
+smaller value later looks fine, a larger one stays blurry, with no signal why.
+
 ## Data artifacts
 
 | File | Phase | Contents |

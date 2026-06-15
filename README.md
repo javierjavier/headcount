@@ -81,7 +81,22 @@ python faces.py query --with ada,ben          # both present
 python faces.py query --with ada,ben --jpeg   # browsable: reliable thumbnails
 python faces.py query --with ada --without ben
 python faces.py query --only ada,ben          # exactly those two
+
+# 7. serve — browse the whole album in a localhost-only web gallery instead of
+#    Finder: name + time-of-day filters, a preview-size slider, and zip export
+#    (originals, or re-encoded 2048px JPEGs). Nothing leaves the machine; it
+#    binds 127.0.0.1 only. First run builds a thumbnail cache (.serve_cache/),
+#    which is the slow part (re-decodes each HEIC); later runs reuse it.
+python faces.py serve                          # -> http://127.0.0.1:8765
+python faces.py serve --thumb 1024             # sharper previews (see note)
 ```
+
+Previews come from `.serve_cache/` thumbnails built at `--thumb` long-edge
+(default 768). The grid fills cells by the photo's *short* edge and HiDPI/Retina
+screens want ~2× the CSS pixels, so a too-small thumb upscales and looks blurry —
+raise `--thumb` for crisper previews at the cost of build time and disk; lower it
+to save both. Changing the size rebuilds the cache automatically (it records the
+build size and clears stale thumbs); no manual `rm -rf .serve_cache` needed.
 
 ### Calibration (`enroll.py`) — optional, for a new album
 
