@@ -1015,7 +1015,7 @@ SERVE_PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>headcount — browse</title>
 <style>
-  :root { --bg:#16181d; --panel:#1f232b; --ink:#e7e9ee; --muted:#9aa3b2; --accent:#5b9dff; --line:#2c313b; }
+  :root { --bg:#16181d; --panel:#1f232b; --ink:#e7e9ee; --muted:#9aa3b2; --accent:#5b9dff; --line:#2c313b; --cell:150px; }
   * { box-sizing: border-box; }
   body { margin:0; font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
   .wrap { display:flex; height:100vh; }
@@ -1038,6 +1038,12 @@ SERVE_PAGE = """<!doctype html>
   .rangewrap input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; pointer-events:auto; width:16px; height:16px; border-radius:50%; background:var(--accent); border:2px solid var(--bg); cursor:pointer; }
   .rangewrap input[type=range]::-moz-range-thumb { pointer-events:auto; width:14px; height:14px; border-radius:50%; background:var(--accent); border:2px solid var(--bg); cursor:pointer; }
   .hourlab { margin-top:8px; font-variant-numeric:tabular-nums; color:var(--muted); }
+  /* single-thumb range for thumbnail size */
+  .sizerange { width:100%; margin:10px 0 0; height:16px; -webkit-appearance:none; appearance:none; background:none; cursor:pointer; }
+  .sizerange::-webkit-slider-runnable-track { height:4px; border-radius:2px; background:var(--line); }
+  .sizerange::-moz-range-track { height:4px; border-radius:2px; background:var(--line); }
+  .sizerange::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; margin-top:-6px; width:16px; height:16px; border-radius:50%; background:var(--accent); border:2px solid var(--bg); }
+  .sizerange::-moz-range-thumb { width:14px; height:14px; border-radius:50%; background:var(--accent); border:2px solid var(--bg); }
   .bar { display:flex; align-items:center; gap:14px; margin-bottom:14px; position:sticky; top:-16px; background:var(--bg); padding:12px 0; z-index:5; border-bottom:1px solid var(--line); }
   .bar .n { font-weight:600; }
   .bar .spacer { flex:1; }
@@ -1046,10 +1052,11 @@ SERVE_PAGE = """<!doctype html>
   .ctl { display:flex; align-items:center; gap:8px; color:var(--muted); }
   .ctl select { width:auto; }
   .grid { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-start; }
-  .grid .cell { width:150px; height:150px; flex:none; background:var(--panel); border-radius:8px; overflow:hidden; cursor:pointer; border:0; padding:0; }
+  .grid .cell { width:var(--cell); height:var(--cell); flex:none; background:var(--panel); border-radius:8px; overflow:hidden; cursor:pointer; border:0; padding:0;
+    transition:width .12s ease, height .12s ease; content-visibility:auto; contain-intrinsic-size:var(--cell); }
   .grid img { width:100%; height:100%; object-fit:cover; display:block; }
   /* slim vertical date marker sitting inline between each day's photos */
-  .dhead { flex:none; width:30px; height:150px; display:flex; align-items:center; justify-content:center;
+  .dhead { flex:none; width:30px; height:var(--cell); transition:height .12s ease; display:flex; align-items:center; justify-content:center;
            writing-mode:vertical-rl; text-orientation:mixed; white-space:nowrap;
            font-size:11px; font-weight:600; color:var(--muted); letter-spacing:.02em;
            border-left:2px solid var(--line); }
@@ -1096,6 +1103,8 @@ SERVE_PAGE = """<!doctype html>
       <option value="indoor">Indoor</option>
       <option value="outdoor">Outdoor</option>
     </select>
+    <h2>Preview size</h2>
+    <input type="range" class="sizerange" id="csize" min="90" max="300" step="10">
   </aside>
   <main>
     <div class="bar">
@@ -1131,7 +1140,7 @@ SERVE_PAGE = """<!doctype html>
 
 <script>
 const DATA = __MANIFEST__;
-const S = { names:new Set(), mode:"all", hmin:0, hmax:23, scene:"", search:"", sort:"new" };
+const S = { names:new Set(), mode:"all", hmin:0, hmax:23, scene:"", search:"", sort:"new", cell:150 };
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
 // hour bounds present in the data (photos with a known hour)
@@ -1278,6 +1287,15 @@ function updFill() {
 hmin.oninput = e => { S.hmin = Math.min(+e.target.value, S.hmax); e.target.value = S.hmin; hourLabel(); updFill(); render(); };
 hmax.oninput = e => { S.hmax = Math.max(+e.target.value, S.hmin); e.target.value = S.hmax; hourLabel(); updFill(); render(); };
 $("scene").onchange = e => { S.scene = e.target.value; render(); };
+// thumbnail size is pure CSS (a custom property) — no re-render needed
+const csize = $("csize");
+csize.value = S.cell;
+let sizeRAF = 0;   // coalesce rapid input events into one --cell write per frame
+csize.oninput = e => {
+  S.cell = +e.target.value;
+  if (sizeRAF) return;
+  sizeRAF = requestAnimationFrame(() => { sizeRAF = 0; document.documentElement.style.setProperty("--cell", S.cell + "px"); });
+};
 
 $("export").onclick = async () => {
   const btn = $("export"); btn.disabled = true; const was = btn.textContent; btn.textContent = "Zipping…";
