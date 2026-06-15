@@ -1008,12 +1008,23 @@ def cmd_query(args) -> int:
     return 0
 
 
+# Two head-and-shoulders silhouettes on the accent-blue tile — "counting heads".
+FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="7" fill="#5b9dff"/>
+  <circle cx="11.5" cy="12.5" r="4" fill="#fff" opacity="0.55"/>
+  <path d="M4.5 26.5c0-3.9 3.1-7 7-7s7 3.1 7 7z" fill="#fff" opacity="0.55"/>
+  <circle cx="20.5" cy="13.5" r="4.6" fill="#fff"/>
+  <path d="M12 27.5c0-4.7 3.8-8.5 8.5-8.5s8.5 3.8 8.5 8.5z" fill="#fff"/>
+</svg>"""
+
 SERVE_PAGE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>headcount — browse</title>
+<title>headcount</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="mask-icon" href="/favicon.svg" color="#5b9dff">
 <style>
   :root { --bg:#16181d; --panel:#1f232b; --ink:#e7e9ee; --muted:#9aa3b2; --accent:#5b9dff; --line:#2c313b; --cell:150px; }
   * { box-sizing: border-box; }
@@ -1557,6 +1568,9 @@ def cmd_serve(args) -> int:
             path, query = unquote(parts.path), parts.query
             if path == "/":
                 self._send(200, page.encode(), "text/html; charset=utf-8")
+            elif path == "/favicon.svg":
+                self._send(200, FAVICON_SVG.encode(), "image/svg+xml",
+                           {"Cache-Control": "max-age=86400"})
             elif path.startswith("/thumb/"):
                 it = by_key.get(path[len("/thumb/"):])
                 f = cache / f"{it['k']}.jpg" if it else None
