@@ -1044,7 +1044,17 @@ SERVE_PAGE = """<!doctype html>
   .sizerange::-moz-range-track { height:4px; border-radius:2px; background:var(--line); }
   .sizerange::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; margin-top:-6px; width:16px; height:16px; border-radius:50%; background:var(--accent); border:2px solid var(--bg); }
   .sizerange::-moz-range-thumb { width:14px; height:14px; border-radius:50%; background:var(--accent); border:2px solid var(--bg); }
-  .bar { display:flex; align-items:center; gap:14px; margin-bottom:14px; position:sticky; top:-16px; background:var(--bg); padding:12px 0; z-index:5; border-bottom:1px solid var(--line); }
+  /* sticky header wraps the active-filter chips + the controls bar */
+  .topbar { position:sticky; top:-16px; z-index:5; background:var(--bg); padding:12px 0; margin-bottom:14px; border-bottom:1px solid var(--line); }
+  .active { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:10px; }
+  .active:empty { display:none; }
+  .active .lead { color:var(--muted); }
+  .chip { display:inline-flex; align-items:center; gap:5px; background:var(--bg); border:1px solid var(--line); border-radius:999px; padding:3px 7px 3px 11px; font-size:13px; }
+  .chip button { background:none; border:0; color:var(--muted); cursor:pointer; padding:0; font-size:15px; line-height:1; }
+  .chip button:hover { color:var(--ink); }
+  .active .clear { background:none; border:0; color:var(--accent); cursor:pointer; font-weight:600; padding:2px 4px; margin-left:4px; }
+  .active .clear:hover { text-decoration:underline; }
+  .bar { display:flex; align-items:center; gap:14px; }
   .bar .n { font-weight:600; }
   .bar .spacer { flex:1; }
   button { background:var(--accent); color:#fff; border:0; padding:8px 16px; border-radius:7px; font-weight:600; cursor:pointer; }
@@ -1107,6 +1117,8 @@ SERVE_PAGE = """<!doctype html>
     <input type="range" class="sizerange" id="csize" min="90" max="300" step="10">
   </aside>
   <main>
+    <div class="topbar">
+    <div class="active" id="active"></div>
     <div class="bar">
       <span class="n" id="count"></span>
       <span class="ctl">sort
@@ -1123,6 +1135,7 @@ SERVE_PAGE = """<!doctype html>
         </select>
       </span>
       <button id="export">Export zip</button>
+    </div>
     </div>
     <div class="grid" id="grid"></div>
   </main>
@@ -1147,6 +1160,28 @@ const MONTHS = ["January","February","March","April","May","June","July","August
 const hrs = DATA.items.map(i => i.h).filter(h => h !== null);
 const HMIN = hrs.length ? Math.min(...hrs) : 0, HMAX = hrs.length ? Math.max(...hrs) : 23;
 S.hmin = HMIN; S.hmax = HMAX;
+
+// --- persist filters across refreshes (per-origin localStorage) ---
+const SKEY = "headcount.filters.v1";
+function saveState() {
+  try { localStorage.setItem(SKEY, JSON.stringify({
+    names:[...S.names], mode:S.mode, hmin:S.hmin, hmax:S.hmax, scene:S.scene, sort:S.sort, cell:S.cell
+  })); } catch (e) {}
+}
+function loadState() {
+  let v; try { v = JSON.parse(localStorage.getItem(SKEY) || "null"); } catch (e) { return; }
+  if (!v) return;
+  const known = new Set(DATA.names);                              // drop names absent from this album
+  if (Array.isArray(v.names)) S.names = new Set(v.names.filter(n => known.has(n)));
+  if (v.mode === "all" || v.mode === "any") S.mode = v.mode;
+  if (typeof v.hmin === "number") S.hmin = Math.min(Math.max(v.hmin, HMIN), HMAX);   // clamp to data bounds
+  if (typeof v.hmax === "number") S.hmax = Math.min(Math.max(v.hmax, HMIN), HMAX);
+  if (S.hmin > S.hmax) { S.hmin = HMIN; S.hmax = HMAX; }
+  if (v.scene === "indoor" || v.scene === "outdoor") S.scene = v.scene;
+  if (v.sort === "old" || v.sort === "new") S.sort = v.sort;
+  if (typeof v.cell === "number") S.cell = Math.min(Math.max(v.cell, 90), 300);
+}
+loadState();
 
 const $ = id => document.getElementById(id);
 const dayOf = it => it.dt ? it.dt.slice(0,10).replace(/:/g,"-") : "";        // "2026-06-11" or ""
@@ -1180,8 +1215,29 @@ function matches(it) {
   return true;
 }
 
+// active name filters shown above the count, each removable; plus "Clear all"
+function renderActive() {
+  const box = $("active"); box.innerHTML = "";
+  const names = [...S.names].sort();
+  if (!names.length) return;                                   // :empty hides the row
+  const lead = document.createElement("span"); lead.className = "lead"; lead.textContent = "Filtering:";
+  box.appendChild(lead);
+  for (const n of names) {
+    const chip = document.createElement("span"); chip.className = "chip";
+    chip.append(document.createTextNode(n));
+    const x = document.createElement("button"); x.type = "button"; x.textContent = "\\u00d7"; x.title = "Remove " + n;
+    x.onclick = () => { S.names.delete(n); buildNames(); render(); };
+    chip.appendChild(x); box.appendChild(chip);
+  }
+  const clr = document.createElement("button"); clr.type = "button"; clr.className = "clear"; clr.textContent = "Clear all";
+  clr.onclick = () => { S.names.clear(); buildNames(); render(); };
+  box.appendChild(clr);
+}
+
 let current = [];
 function render() {
+  saveState();
+  renderActive();
   current = DATA.items.filter(matches);
   current.sort((a,b) => {
     const x = a.dt || "", y = b.dt || "";
@@ -1272,8 +1328,11 @@ document.addEventListener("keydown", e => {
 });
 
 $("nsearch").oninput = e => { S.search = e.target.value.trim().toLowerCase(); buildNames(); };
-for (const r of document.querySelectorAll('input[name=mode]'))
+for (const r of document.querySelectorAll('input[name=mode]')) {
+  r.checked = (r.value === S.mode);
   r.onchange = e => { S.mode = e.target.value; render(); };
+}
+$("sort").value = S.sort;
 $("sort").onchange = e => { S.sort = e.target.value; render(); };
 // dual range spans the actual hour bounds, so full extent == "Any time"
 const hmin = $("hmin"), hmax = $("hmax");
@@ -1286,13 +1345,16 @@ function updFill() {
 }
 hmin.oninput = e => { S.hmin = Math.min(+e.target.value, S.hmax); e.target.value = S.hmin; hourLabel(); updFill(); render(); };
 hmax.oninput = e => { S.hmax = Math.max(+e.target.value, S.hmin); e.target.value = S.hmax; hourLabel(); updFill(); render(); };
+$("scene").value = S.scene;
 $("scene").onchange = e => { S.scene = e.target.value; render(); };
 // thumbnail size is pure CSS (a custom property) — no re-render needed
 const csize = $("csize");
 csize.value = S.cell;
+document.documentElement.style.setProperty("--cell", S.cell + "px");   // reflect restored size at load
 let sizeRAF = 0;   // coalesce rapid input events into one --cell write per frame
 csize.oninput = e => {
   S.cell = +e.target.value;
+  saveState();
   if (sizeRAF) return;
   sizeRAF = requestAnimationFrame(() => { sizeRAF = 0; document.documentElement.style.setProperty("--cell", S.cell + "px"); });
 };
