@@ -1076,7 +1076,7 @@ SERVE_PAGE = """<!doctype html>
         flex-direction:column; align-items:center; justify-content:center; }
   #lbstage { position:relative; flex:1; width:100%; display:flex; align-items:center; justify-content:center; min-height:0; padding:48px 64px 8px; }
   #lbimg { max-width:100%; max-height:100%; object-fit:contain; border-radius:6px;
-           transition:filter .15s; }
+           transition:filter .15s; cursor:zoom-in; }
   #lbimg.loading { filter:blur(8px); }
   #lbcap { padding:6px 16px 14px; color:var(--muted); text-align:center; }
   #lbcap b { color:var(--ink); }
@@ -1295,20 +1295,23 @@ function buildNames() {
 }
 
 // --- lightbox: show the (already-loaded) thumbnail instantly, swap in the
-// 2048px render when it arrives; "full resolution" link opens the original. ---
+// 2048px render when it arrives; clicking the image opens the original. ---
 let lbi = -1;
 function openLB(i) {
   lbi = i; const it = current[i];
   const img = $("lbimg");
   img.classList.add("loading");
   img.src = "/thumb/" + encodeURIComponent(it.k);     // instant placeholder
+  const orig = "/full/" + encodeURIComponent(it.k) + "?full=1";
+  img.title = "Open full resolution";
+  img.onclick = () => window.open(orig, "_blank", "noopener");
   const full = new Image();
   full.onload = () => { if (lbi === i) { img.src = full.src; img.classList.remove("loading"); } };
   full.src = "/full/" + encodeURIComponent(it.k);
   const day = dayOf(it), time = prettyTime(it.dt);
   $("lbcap").innerHTML = "<b>" + (it.n.join(", ") || "(no names)") + "</b> · " + prettyDay(day) +
     (time ? " · " + time : "") +
-    ' <a href="/full/' + encodeURIComponent(it.k) + '?full=1" target="_blank" rel="noopener">full resolution &#8599;</a>';
+    ' <a href="' + orig + '" target="_blank" rel="noopener">full resolution &#8599;</a>';
   $("lbprev").style.visibility = i > 0 ? "visible" : "hidden";
   $("lbnext").style.visibility = i < current.length - 1 ? "visible" : "hidden";
   $("lb").style.display = "flex";
