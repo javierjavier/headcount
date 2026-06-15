@@ -1215,6 +1215,21 @@ function matches(it) {
   return true;
 }
 
+// --- preview warming: decode each on-screen thumbnail's 2048px preview in the
+// background so the lightbox opens instantly. The server caches each render to
+// disk (decoded once) and the browser caches the response, so warming a key is
+// cheap after the first hit and openLB reuses whatever's already in flight. ---
+const warmed = new Set();
+function warm(k) {
+  if (!k || warmed.has(k)) return;
+  warmed.add(k);
+  new Image().src = "/full/" + encodeURIComponent(k);   // 2048px preview (no full=1)
+}
+// observe thumbnails near the viewport; warm as they scroll into view
+const warmIO = ("IntersectionObserver" in window) ? new IntersectionObserver((entries) => {
+  for (const e of entries) if (e.isIntersecting) { warm(e.target.dataset.k); warmIO.unobserve(e.target); }
+}, { rootMargin: "300px" }) : null;
+
 // active name filters shown above the count, each removable; plus "Clear all"
 function renderActive() {
   const box = $("active"); box.innerHTML = "";
@@ -1250,6 +1265,7 @@ function render() {
   $("export").disabled = current.length === 0;
   const grid = $("grid");
   if (!current.length) { grid.innerHTML = '<div class="empty">No photos match these filters.</div>'; return; }
+  if (warmIO) warmIO.disconnect();   // drop observations on the cells we're about to discard
   grid.innerHTML = "";
   const frag = document.createDocumentFragment();
   let lastDay = null;
@@ -1265,11 +1281,13 @@ function render() {
     }
     const cell = document.createElement("button");
     cell.className = "cell"; cell.title = it.n.join(", "); cell.onclick = () => openLB(i);
+    cell.dataset.k = it.k;
     const img = document.createElement("img");
     img.loading = "lazy"; img.src = "/thumb/" + encodeURIComponent(it.k);
     cell.appendChild(img); frag.appendChild(cell);
   });
   grid.appendChild(frag);
+  if (warmIO) for (const c of grid.children) if (c.dataset.k) warmIO.observe(c);
 }
 
 function hourLabel() {
@@ -1314,6 +1332,8 @@ function openLB(i) {
     ' <a href="' + orig + '" target="_blank" rel="noopener">full resolution &#8599;</a>';
   $("lbprev").style.visibility = i > 0 ? "visible" : "hidden";
   $("lbnext").style.visibility = i < current.length - 1 ? "visible" : "hidden";
+  if (i > 0) warm(current[i - 1].k);                       // warm neighbors so arrow-nav is instant
+  if (i < current.length - 1) warm(current[i + 1].k);
   $("lb").style.display = "flex";
 }
 function closeLB() { $("lb").style.display = "none"; lbi = -1; }
@@ -1434,8 +1454,10 @@ def cmd_serve(args) -> int:
     import http.server
     import io
     import json
+    import os
     import socketserver
     import tempfile
+    import threading
     import webbrowser
     import zipfile
 
@@ -1483,6 +1505,11 @@ def cmd_serve(args) -> int:
 
     cache = Path(args.cache)
     cache.mkdir(parents=True, exist_ok=True)
+    # 2048px lightbox previews are decoded on demand and cached here so each
+    # original is HEIC-decoded at most once ever (the slow part). Kept in a
+    # subdir so _build_thumbs's `*.jpg` stale-sweep never touches them.
+    pcache = cache / "preview"
+    pcache.mkdir(exist_ok=True)
     _build_thumbs(items, album, cache, args.thumb, args.prefetch)
 
     # Capture-date sidecar for sort + date grouping. Re-reading EXIF for every
@@ -1541,15 +1568,24 @@ def cmd_serve(args) -> int:
             elif path.startswith("/full/"):
                 it = by_key.get(path[len("/full/"):])
                 src = (album / it["f"]) if it else None
-                if src and src.exists():
+                if not (src and src.exists()):
+                    self._send(404, b"not found", "text/plain")
+                elif "full=1" in query:                # full res: rare path, decode each time
                     img = load_image_rgb_pil(src)
-                    if "full=1" not in query:          # default: 2048px preview; full=1 serves full res
-                        img.thumbnail((2048, 2048))
                     buf = io.BytesIO()
                     img.save(buf, "JPEG", quality=90)
-                    self._send(200, buf.getvalue(), "image/jpeg")
-                else:
-                    self._send(404, b"not found", "text/plain")
+                    self._send(200, buf.getvalue(), "image/jpeg",
+                               {"Cache-Control": "max-age=3600"})
+                else:                                  # 2048px preview: build once to disk, then serve cached
+                    pf = pcache / f"{it['k']}.jpg"
+                    if not pf.exists():
+                        img = load_image_rgb_pil(src)
+                        img.thumbnail((2048, 2048))
+                        tmp = pf.with_suffix(f".{threading.get_ident()}.tmp")   # per-thread temp; atomic rename so a concurrent reader never sees a partial file
+                        img.save(tmp, "JPEG", quality=90)
+                        os.replace(tmp, pf)
+                    self._send(200, pf.read_bytes(), "image/jpeg",
+                               {"Cache-Control": "max-age=3600"})
             else:
                 self._send(404, b"not found", "text/plain")
 
