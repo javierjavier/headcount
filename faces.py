@@ -1324,7 +1324,24 @@ def _build_thumbs(items, album, cache, size, workers):
     HEIC decode is the slow part, so we cache by key and skip ones already done
     on re-runs. EXIF (incl. GPS) is dropped from thumbnails — they only need to
     look right in a grid. Mirrors cmd_query's prefetch-threaded decode style.
+
+    The cache records the size it was built at in a `.thumb_size` marker; when
+    the requested size differs (or the marker is missing) the existing thumbs
+    are stale, so we clear them and rebuild. Without this, the `exists()` skip
+    below would silently keep serving thumbs at whatever size they were first
+    built — a smaller `--thumb` later looks fine, a larger one stays blurry.
     """
+    marker = cache / ".thumb_size"
+    prev = marker.read_text().strip() if marker.exists() else None
+    if prev != str(size):
+        stale = list(cache.glob("*.jpg"))
+        if stale:
+            print(f"Thumbnails: size changed ({prev or 'unknown'} -> {size}px), "
+                  f"clearing {len(stale)} stale thumbs.")
+            for f in stale:
+                f.unlink()
+        marker.write_text(str(size))
+
     todo = [it for it in items if not (cache / f"{it['k']}.jpg").exists()]
     if not todo:
         print(f"Thumbnails: {len(items)} cached, 0 to build.")
@@ -1640,7 +1657,7 @@ def main() -> int:
     p_srv.add_argument("--image-people", default="image_people.csv", help="index from `assign`")
     p_srv.add_argument("--scene", default="scene.csv", help="scene/hour index from `scene` (optional)")
     p_srv.add_argument("--cache", default=".serve_cache", help="thumbnail cache dir (default: .serve_cache/)")
-    p_srv.add_argument("--thumb", type=int, default=320, help="thumbnail long edge in px (default: 320)")
+    p_srv.add_argument("--thumb", type=int, default=768, help="thumbnail long edge in px (default: 768)")
     p_srv.add_argument("--prefetch", type=int, default=4, help="background decode threads for thumbs (default: 4)")
     p_srv.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1 — localhost only)")
     p_srv.add_argument("--port", type=int, default=8765, help="port (default: 8765)")
