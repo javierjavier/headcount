@@ -634,6 +634,20 @@ def _exif_hour(path: Path) -> int:
         return -1
 
 
+def _exif_dt(path: Path) -> str:
+    """Raw EXIF capture datetime 'YYYY:MM:DD HH:MM:SS', or '' if missing.
+
+    Reads only the EXIF header (no full pixel decode), so it's cheap enough to
+    run over the whole album — `serve` caches the result either way.
+    """
+    from PIL import Image
+
+    try:
+        return Image.open(path).getexif().get(306, "") or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _parse_hours(spec: str) -> set:
     """'10-11' -> {10, 11}; also accepts a comma list like '10,11'."""
     out: set = set()
@@ -994,6 +1008,650 @@ def cmd_query(args) -> int:
     return 0
 
 
+SERVE_PAGE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>headcount — browse</title>
+<style>
+  :root { --bg:#16181d; --panel:#1f232b; --ink:#e7e9ee; --muted:#9aa3b2; --accent:#5b9dff; --line:#2c313b; --cell:150px; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
+  .wrap { display:flex; height:100vh; }
+  aside { width:280px; flex:none; background:var(--panel); border-right:1px solid var(--line); padding:16px; overflow-y:auto; }
+  main { flex:1; overflow-y:auto; padding:16px 20px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:20px 0 8px; }
+  h2:first-child { margin-top:0; }
+  input[type=search], select { width:100%; padding:7px 9px; background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:7px; }
+  .names { max-height:38vh; overflow-y:auto; border:1px solid var(--line); border-radius:7px; padding:6px; margin-top:8px; }
+  .names label { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:5px; cursor:pointer; }
+  .names label:hover { background:var(--bg); }
+  .names .count { margin-left:auto; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .modes { display:flex; gap:14px; margin-top:8px; color:var(--muted); }
+  .modes label { display:flex; gap:5px; align-items:center; cursor:pointer; }
+  /* dual-thumb range: two transparent sliders overlaid on one shared track */
+  .rangewrap { position:relative; height:20px; margin:10px 8px 0; }
+  .rangewrap .track { position:absolute; top:50%; left:0; right:0; height:4px; transform:translateY(-50%); background:var(--line); border-radius:2px; }
+  .rangewrap .fill { position:absolute; top:50%; height:4px; transform:translateY(-50%); background:var(--accent); border-radius:2px; }
+  .rangewrap input[type=range] { position:absolute; top:50%; transform:translateY(-50%); left:0; width:100%; height:16px; margin:0; padding:0; background:none; pointer-events:none; -webkit-appearance:none; appearance:none; }
+  .rangewrap input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; pointer-events:auto; width:16px; height:16px; border-radius:50%; background:var(--accent); border:2px solid var(--bg); cursor:pointer; }
+  .rangewrap input[type=range]::-moz-range-thumb { pointer-events:auto; width:14px; height:14px; border-radius:50%; background:var(--accent); border:2px solid var(--bg); cursor:pointer; }
+  .hourlab { margin-top:8px; font-variant-numeric:tabular-nums; color:var(--muted); }
+  /* single-thumb range for thumbnail size */
+  .sizerange { width:100%; margin:10px 0 0; height:16px; -webkit-appearance:none; appearance:none; background:none; cursor:pointer; }
+  .sizerange::-webkit-slider-runnable-track { height:4px; border-radius:2px; background:var(--line); }
+  .sizerange::-moz-range-track { height:4px; border-radius:2px; background:var(--line); }
+  .sizerange::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; margin-top:-6px; width:16px; height:16px; border-radius:50%; background:var(--accent); border:2px solid var(--bg); }
+  .sizerange::-moz-range-thumb { width:14px; height:14px; border-radius:50%; background:var(--accent); border:2px solid var(--bg); }
+  /* sticky header wraps the active-filter chips + the controls bar */
+  .topbar { position:sticky; top:-16px; z-index:5; background:var(--bg); padding:12px 0; margin-bottom:14px; border-bottom:1px solid var(--line); }
+  .active { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:10px; }
+  .active:empty { display:none; }
+  .active .lead { color:var(--muted); }
+  .chip { display:inline-flex; align-items:center; gap:5px; background:var(--bg); border:1px solid var(--line); border-radius:999px; padding:3px 7px 3px 11px; font-size:13px; }
+  .chip button { background:none; border:0; color:var(--muted); cursor:pointer; padding:0; font-size:15px; line-height:1; }
+  .chip button:hover { color:var(--ink); }
+  .active .clear { background:none; border:0; color:var(--accent); cursor:pointer; font-weight:600; padding:2px 4px; margin-left:4px; }
+  .active .clear:hover { text-decoration:underline; }
+  .bar { display:flex; align-items:center; gap:14px; }
+  .bar .n { font-weight:600; }
+  .bar .spacer { flex:1; }
+  button { background:var(--accent); color:#fff; border:0; padding:8px 16px; border-radius:7px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.4; cursor:default; }
+  .ctl { display:flex; align-items:center; gap:8px; color:var(--muted); }
+  .ctl select { width:auto; }
+  .grid { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-start; }
+  .grid .cell { width:var(--cell); height:var(--cell); flex:none; background:var(--panel); border-radius:8px; overflow:hidden; cursor:pointer; border:0; padding:0;
+    transition:width .12s ease, height .12s ease; content-visibility:auto; contain-intrinsic-size:var(--cell); }
+  .grid img { width:100%; height:100%; object-fit:cover; display:block; }
+  /* slim vertical date marker sitting inline between each day's photos */
+  .dhead { flex:none; width:30px; height:var(--cell); transition:height .12s ease; display:flex; align-items:center; justify-content:center;
+           writing-mode:vertical-rl; text-orientation:mixed; white-space:nowrap;
+           font-size:11px; font-weight:600; color:var(--muted); letter-spacing:.02em;
+           border-left:2px solid var(--line); }
+  .empty { color:var(--muted); padding:40px 0; text-align:center; }
+  /* lightbox */
+  #lb { display:none; position:fixed; inset:0; background:rgba(8,9,12,.92); z-index:50;
+        flex-direction:column; align-items:center; justify-content:center; }
+  #lbstage { position:relative; flex:1; width:100%; display:flex; align-items:center; justify-content:center; min-height:0; padding:48px 64px 8px; }
+  #lbimg { max-width:100%; max-height:100%; object-fit:contain; border-radius:6px;
+           transition:filter .15s; cursor:zoom-in; }
+  #lbimg.loading { filter:blur(8px); }
+  #lbcap { padding:6px 16px 14px; color:var(--muted); text-align:center; }
+  #lbcap b { color:var(--ink); }
+  #lbcap a { color:var(--accent); text-decoration:none; margin-left:10px; }
+  #lbcap a:hover { text-decoration:underline; }
+  .lbbtn { position:absolute; top:50%; transform:translateY(-50%); background:rgba(255,255,255,.08);
+           color:#fff; border:0; width:44px; height:64px; border-radius:8px; font-size:24px; cursor:pointer; }
+  .lbbtn:hover { background:rgba(255,255,255,.16); }
+  #lbprev { left:10px; } #lbnext { right:10px; }
+  #lbclose { position:absolute; top:14px; right:18px; background:none; border:0; color:#fff; font-size:30px; cursor:pointer; width:auto; height:auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <aside>
+    <h2>Names</h2>
+    <input type="search" id="nsearch" placeholder="filter names…" autocomplete="off">
+    <div class="modes">
+      <label><input type="radio" name="mode" value="all" checked> all of</label>
+      <label><input type="radio" name="mode" value="any"> any of</label>
+    </div>
+    <div class="names" id="names"></div>
+    <h2>Time of day</h2>
+    <div class="rangewrap">
+      <div class="track"></div>
+      <div class="fill" id="hfill"></div>
+      <input type="range" id="hmin" step="1">
+      <input type="range" id="hmax" step="1">
+    </div>
+    <div class="hourlab" id="hourlab"></div>
+    <h2>Scene</h2>
+    <select id="scene">
+      <option value="">Any</option>
+      <option value="indoor">Indoor</option>
+      <option value="outdoor">Outdoor</option>
+    </select>
+    <h2>Preview size</h2>
+    <input type="range" class="sizerange" id="csize" min="90" max="300" step="10">
+  </aside>
+  <main>
+    <div class="topbar">
+    <div class="active" id="active"></div>
+    <div class="bar">
+      <span class="n" id="count"></span>
+      <span class="ctl">sort
+        <select id="sort">
+          <option value="new">Newest first</option>
+          <option value="old">Oldest first</option>
+        </select>
+      </span>
+      <span class="spacer" style="flex:1"></span>
+      <span class="ctl">export as
+        <select id="fmt">
+          <option value="orig">originals (full quality)</option>
+          <option value="jpeg">JPEG 2048px (smaller, universal)</option>
+        </select>
+      </span>
+      <button id="export">Export zip</button>
+    </div>
+    </div>
+    <div class="grid" id="grid"></div>
+  </main>
+</div>
+
+<div id="lb">
+  <button id="lbclose" title="Close (Esc)">&times;</button>
+  <div id="lbstage">
+    <button class="lbbtn" id="lbprev" title="Previous (←)">&#8249;</button>
+    <img id="lbimg" alt="">
+    <button class="lbbtn" id="lbnext" title="Next (→)">&#8250;</button>
+  </div>
+  <div id="lbcap"></div>
+</div>
+
+<script>
+const DATA = __MANIFEST__;
+const S = { names:new Set(), mode:"all", hmin:0, hmax:23, scene:"", search:"", sort:"new", cell:150 };
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+// hour bounds present in the data (photos with a known hour)
+const hrs = DATA.items.map(i => i.h).filter(h => h !== null);
+const HMIN = hrs.length ? Math.min(...hrs) : 0, HMAX = hrs.length ? Math.max(...hrs) : 23;
+S.hmin = HMIN; S.hmax = HMAX;
+
+// --- persist filters across refreshes (per-origin localStorage) ---
+const SKEY = "headcount.filters.v1";
+function saveState() {
+  try { localStorage.setItem(SKEY, JSON.stringify({
+    names:[...S.names], mode:S.mode, hmin:S.hmin, hmax:S.hmax, scene:S.scene, sort:S.sort, cell:S.cell
+  })); } catch (e) {}
+}
+function loadState() {
+  let v; try { v = JSON.parse(localStorage.getItem(SKEY) || "null"); } catch (e) { return; }
+  if (!v) return;
+  const known = new Set(DATA.names);                              // drop names absent from this album
+  if (Array.isArray(v.names)) S.names = new Set(v.names.filter(n => known.has(n)));
+  if (v.mode === "all" || v.mode === "any") S.mode = v.mode;
+  if (typeof v.hmin === "number") S.hmin = Math.min(Math.max(v.hmin, HMIN), HMAX);   // clamp to data bounds
+  if (typeof v.hmax === "number") S.hmax = Math.min(Math.max(v.hmax, HMIN), HMAX);
+  if (S.hmin > S.hmax) { S.hmin = HMIN; S.hmax = HMAX; }
+  if (v.scene === "indoor" || v.scene === "outdoor") S.scene = v.scene;
+  if (v.sort === "old" || v.sort === "new") S.sort = v.sort;
+  if (typeof v.cell === "number") S.cell = Math.min(Math.max(v.cell, 90), 300);
+}
+loadState();
+
+const $ = id => document.getElementById(id);
+const dayOf = it => it.dt ? it.dt.slice(0,10).replace(/:/g,"-") : "";        // "2026-06-11" or ""
+function prettyDay(d) {
+  if (!d) return "Undated";
+  const [y,m,day] = d.split("-");
+  return MONTHS[+m-1] + " " + (+day) + ", " + y;
+}
+function prettyDayShort(d) {                       // compact mm/dd/yyyy label for the vertical marker
+  if (!d) return "Undated";
+  const [y,m,day] = d.split("-");
+  return m + "/" + day + "/" + y;
+}
+function prettyTime(dt) {                           // "2026:06:03 09:23:03" -> "9:23 AM"
+  const t = (dt || "").split(" ")[1];
+  if (!t) return "";
+  let [h, m] = t.split(":").map(Number);
+  const ap = h < 12 ? "AM" : "PM";
+  h = h % 12 || 12;
+  return h + ":" + String(m).padStart(2,"0") + " " + ap;
+}
+
+function matches(it) {
+  if (S.names.size) {
+    const has = it.n.filter(n => S.names.has(n)).length;
+    if (S.mode === "all" && has < S.names.size) return false;
+    if (S.mode === "any" && has === 0) return false;
+  }
+  if (it.h !== null && (it.h < S.hmin || it.h > S.hmax)) return false;   // unknown hour always passes
+  if (S.scene && it.s !== S.scene) return false;
+  return true;
+}
+
+// --- preview warming: decode each on-screen thumbnail's 2048px preview in the
+// background so the lightbox opens instantly. The server caches each render to
+// disk (decoded once) and the browser caches the response, so warming a key is
+// cheap after the first hit and openLB reuses whatever's already in flight. ---
+const warmed = new Set();
+function warm(k) {
+  if (!k || warmed.has(k)) return;
+  warmed.add(k);
+  new Image().src = "/full/" + encodeURIComponent(k);   // 2048px preview (no full=1)
+}
+// observe thumbnails near the viewport; warm as they scroll into view
+const warmIO = ("IntersectionObserver" in window) ? new IntersectionObserver((entries) => {
+  for (const e of entries) if (e.isIntersecting) { warm(e.target.dataset.k); warmIO.unobserve(e.target); }
+}, { rootMargin: "300px" }) : null;
+
+// active name filters shown above the count, each removable; plus "Clear all"
+function renderActive() {
+  const box = $("active"); box.innerHTML = "";
+  const names = [...S.names].sort();
+  if (!names.length) return;                                   // :empty hides the row
+  const lead = document.createElement("span"); lead.className = "lead"; lead.textContent = "Filtering:";
+  box.appendChild(lead);
+  for (const n of names) {
+    const chip = document.createElement("span"); chip.className = "chip";
+    chip.append(document.createTextNode(n));
+    const x = document.createElement("button"); x.type = "button"; x.textContent = "\\u00d7"; x.title = "Remove " + n;
+    x.onclick = () => { S.names.delete(n); buildNames(); render(); };
+    chip.appendChild(x); box.appendChild(chip);
+  }
+  const clr = document.createElement("button"); clr.type = "button"; clr.className = "clear"; clr.textContent = "Clear all";
+  clr.onclick = () => { S.names.clear(); buildNames(); render(); };
+  box.appendChild(clr);
+}
+
+let current = [];
+function render() {
+  saveState();
+  renderActive();
+  current = DATA.items.filter(matches);
+  current.sort((a,b) => {
+    const x = a.dt || "", y = b.dt || "";
+    if (!x && !y) return 0;
+    if (!x) return 1;            // undated sinks to the end either way
+    if (!y) return -1;
+    return S.sort === "old" ? (x < y ? -1 : x > y ? 1 : 0) : (x < y ? 1 : x > y ? -1 : 0);
+  });
+  $("count").textContent = current.length + " photo" + (current.length === 1 ? "" : "s");
+  $("export").disabled = current.length === 0;
+  const grid = $("grid");
+  if (!current.length) { grid.innerHTML = '<div class="empty">No photos match these filters.</div>'; return; }
+  if (warmIO) warmIO.disconnect();   // drop observations on the cells we're about to discard
+  grid.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  let lastDay = null;
+  current.forEach((it, i) => {
+    const day = dayOf(it);
+    if (day !== lastDay) {
+      lastDay = day;
+      const sameDay = current.filter(o => dayOf(o) === day).length;
+      const h = document.createElement("div"); h.className = "dhead";
+      h.textContent = prettyDayShort(day);
+      h.title = prettyDay(day) + " · " + sameDay + " photo" + (sameDay === 1 ? "" : "s");
+      frag.appendChild(h);
+    }
+    const cell = document.createElement("button");
+    cell.className = "cell"; cell.title = it.n.join(", "); cell.onclick = () => openLB(i);
+    cell.dataset.k = it.k;
+    const img = document.createElement("img");
+    img.loading = "lazy"; img.src = "/thumb/" + encodeURIComponent(it.k);
+    cell.appendChild(img); frag.appendChild(cell);
+  });
+  grid.appendChild(frag);
+  if (warmIO) for (const c of grid.children) if (c.dataset.k) warmIO.observe(c);
+}
+
+function hourLabel() {
+  $("hourlab").textContent = (S.hmin === HMIN && S.hmax === HMAX)
+    ? "Any time" : (String(S.hmin).padStart(2,"0") + ":00 – " + String(S.hmax).padStart(2,"0") + ":59");
+}
+
+function buildNames() {
+  const box = $("names"); box.innerHTML = "";
+  const counts = {};
+  for (const n of DATA.names) counts[n] = 0;
+  for (const it of DATA.items) for (const n of it.n) counts[n] = (counts[n]||0) + 1;
+  for (const n of DATA.names) {
+    if (S.search && !n.toLowerCase().includes(S.search)) continue;
+    const lab = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = S.names.has(n);
+    cb.onchange = () => { cb.checked ? S.names.add(n) : S.names.delete(n); render(); };
+    const span = document.createElement("span"); span.textContent = n;
+    const c = document.createElement("span"); c.className = "count"; c.textContent = counts[n];
+    lab.append(cb, span, c); box.appendChild(lab);
+  }
+}
+
+// --- lightbox: show the (already-loaded) thumbnail instantly, swap in the
+// 2048px render when it arrives; clicking the image opens the original. ---
+let lbi = -1;
+function openLB(i) {
+  lbi = i; const it = current[i];
+  const img = $("lbimg");
+  img.classList.add("loading");
+  img.src = "/thumb/" + encodeURIComponent(it.k);     // instant placeholder
+  const orig = "/full/" + encodeURIComponent(it.k) + "?full=1";
+  img.title = "Open full resolution";
+  img.onclick = () => window.open(orig, "_blank", "noopener");
+  const full = new Image();
+  full.onload = () => { if (lbi === i) { img.src = full.src; img.classList.remove("loading"); } };
+  full.src = "/full/" + encodeURIComponent(it.k);
+  const day = dayOf(it), time = prettyTime(it.dt);
+  $("lbcap").innerHTML = "<b>" + (it.n.join(", ") || "(no names)") + "</b> · " + prettyDay(day) +
+    (time ? " · " + time : "") +
+    ' <a href="' + orig + '" target="_blank" rel="noopener">full resolution &#8599;</a>';
+  $("lbprev").style.visibility = i > 0 ? "visible" : "hidden";
+  $("lbnext").style.visibility = i < current.length - 1 ? "visible" : "hidden";
+  if (i > 0) warm(current[i - 1].k);                       // warm neighbors so arrow-nav is instant
+  if (i < current.length - 1) warm(current[i + 1].k);
+  $("lb").style.display = "flex";
+}
+function closeLB() { $("lb").style.display = "none"; lbi = -1; }
+function navLB(d) { const n = lbi + d; if (n >= 0 && n < current.length) openLB(n); }
+
+$("lbclose").onclick = closeLB;
+$("lbprev").onclick = () => navLB(-1);
+$("lbnext").onclick = () => navLB(1);
+$("lb").onclick = e => { if (e.target === $("lb") || e.target.id === "lbstage") closeLB(); };
+document.addEventListener("keydown", e => {
+  if ($("lb").style.display === "none") return;
+  if (e.key === "Escape") closeLB();
+  else if (e.key === "ArrowLeft") navLB(-1);
+  else if (e.key === "ArrowRight") navLB(1);
+});
+
+$("nsearch").oninput = e => { S.search = e.target.value.trim().toLowerCase(); buildNames(); };
+for (const r of document.querySelectorAll('input[name=mode]')) {
+  r.checked = (r.value === S.mode);
+  r.onchange = e => { S.mode = e.target.value; render(); };
+}
+$("sort").value = S.sort;
+$("sort").onchange = e => { S.sort = e.target.value; render(); };
+// dual range spans the actual hour bounds, so full extent == "Any time"
+const hmin = $("hmin"), hmax = $("hmax");
+hmin.min = hmax.min = HMIN; hmin.max = hmax.max = HMAX;
+hmin.value = S.hmin; hmax.value = S.hmax;
+function updFill() {
+  const span = Math.max(1, HMAX - HMIN);
+  $("hfill").style.left = (S.hmin - HMIN) / span * 100 + "%";
+  $("hfill").style.right = (HMAX - S.hmax) / span * 100 + "%";
+}
+hmin.oninput = e => { S.hmin = Math.min(+e.target.value, S.hmax); e.target.value = S.hmin; hourLabel(); updFill(); render(); };
+hmax.oninput = e => { S.hmax = Math.max(+e.target.value, S.hmin); e.target.value = S.hmax; hourLabel(); updFill(); render(); };
+$("scene").value = S.scene;
+$("scene").onchange = e => { S.scene = e.target.value; render(); };
+// thumbnail size is pure CSS (a custom property) — no re-render needed
+const csize = $("csize");
+csize.value = S.cell;
+document.documentElement.style.setProperty("--cell", S.cell + "px");   // reflect restored size at load
+let sizeRAF = 0;   // coalesce rapid input events into one --cell write per frame
+csize.oninput = e => {
+  S.cell = +e.target.value;
+  saveState();
+  if (sizeRAF) return;
+  sizeRAF = requestAnimationFrame(() => { sizeRAF = 0; document.documentElement.style.setProperty("--cell", S.cell + "px"); });
+};
+
+$("export").onclick = async () => {
+  const btn = $("export"); btn.disabled = true; const was = btn.textContent; btn.textContent = "Zipping…";
+  try {
+    const res = await fetch("/export", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ keys: current.map(i => i.k), fmt: $("fmt").value })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob), a = document.createElement("a");
+    a.href = url; a.download = "headcount_export.zip"; a.click(); URL.revokeObjectURL(url);
+  } catch (err) { alert("Export failed: " + err.message); }
+  finally { btn.textContent = was; btn.disabled = current.length === 0; }
+};
+
+buildNames(); hourLabel(); updFill(); render();
+</script>
+</body>
+</html>"""
+
+
+def _build_thumbs(items, album, cache, size, workers):
+    """Pre-render a square-ish JPEG thumbnail per item into *cache* (idempotent).
+
+    HEIC decode is the slow part, so we cache by key and skip ones already done
+    on re-runs. EXIF (incl. GPS) is dropped from thumbnails — they only need to
+    look right in a grid. Mirrors cmd_query's prefetch-threaded decode style.
+
+    The cache records the size it was built at in a `.thumb_size` marker; when
+    the requested size differs (or the marker is missing) the existing thumbs
+    are stale, so we clear them and rebuild. Without this, the `exists()` skip
+    below would silently keep serving thumbs at whatever size they were first
+    built — a smaller `--thumb` later looks fine, a larger one stays blurry.
+    """
+    marker = cache / ".thumb_size"
+    prev = marker.read_text().strip() if marker.exists() else None
+    if prev != str(size):
+        stale = list(cache.glob("*.jpg"))
+        if stale:
+            print(f"Thumbnails: size changed ({prev or 'unknown'} -> {size}px), "
+                  f"clearing {len(stale)} stale thumbs.")
+            for f in stale:
+                f.unlink()
+        marker.write_text(str(size))
+
+    todo = [it for it in items if not (cache / f"{it['k']}.jpg").exists()]
+    if not todo:
+        print(f"Thumbnails: {len(items)} cached, 0 to build.")
+        return
+    print(f"Thumbnails: building {len(todo)} (of {len(items)}) -> {cache}/ ...")
+    done = 0
+
+    def one(it):
+        src = (album / it["f"]).resolve()
+        if not src.exists():
+            return
+        img = load_image_rgb_pil(src)   # upright RGB; EXIF dropped on save below
+        img.thumbnail((size, size))
+        img.save(cache / f"{it['k']}.jpg", "JPEG", quality=80)
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        for _ in ex.map(one, todo):
+            done += 1
+            if done % 200 == 0:
+                print(f"  {done}/{len(todo)}")
+    print(f"  done ({len(todo)} built).")
+
+
+def cmd_serve(args) -> int:
+    import http.server
+    import io
+    import json
+    import os
+    import socketserver
+    import tempfile
+    import threading
+    import webbrowser
+    import zipfile
+
+    ip = Path(args.image_people)
+    if not ip.exists():
+        print(f"{ip} not found — run `assign` first.", file=sys.stderr)
+        return 1
+
+    people = {
+        r["filename"]: sorted(filter(None, (r.get("names") or "").split(";")))
+        for r in read_face_rows(ip)
+    }
+
+    # Optional scene/hour overlay — present iff a `scene` pass has been run.
+    hours, scenes = {}, {}
+    sp = Path(args.scene)
+    if sp.exists():
+        for r in read_face_rows(sp):
+            h = r.get("hour")
+            hours[r["filename"]] = int(h) if h not in (None, "") and str(h).isdigit() else None
+            scenes[r["filename"]] = r.get("scene") or ""
+
+    album = Path(args.album)
+    # `k` is a filesystem-safe key (the stem) used for thumb/full URLs and as the
+    # cache filename; `f` is the real album filename used to read original bytes.
+    # Stems can collide (e.g. IMG_1.HEIC vs IMG_1.JPG — the same case _unique_path
+    # guards) — suffix dupes so neither photo gets silently shadowed.
+    items, by_key = [], {}
+    for fn, names in sorted(people.items()):
+        if not (album / fn).exists():
+            continue
+        key = Path(fn).stem
+        if key in by_key:
+            i = 1
+            while f"{key}-{i}" in by_key:
+                i += 1
+            key = f"{key}-{i}"
+        it = {"k": key, "f": fn, "n": names,
+              "h": hours.get(fn), "s": scenes.get(fn, "")}
+        items.append(it)
+        by_key[key] = it
+    if not items:
+        print(f"No album files found for the {len(people)} indexed photos under {album}/.", file=sys.stderr)
+        return 1
+
+    cache = Path(args.cache)
+    cache.mkdir(parents=True, exist_ok=True)
+    # 2048px lightbox previews are decoded on demand and cached here so each
+    # original is HEIC-decoded at most once ever (the slow part). Kept in a
+    # subdir so _build_thumbs's `*.jpg` stale-sweep never touches them.
+    pcache = cache / "preview"
+    pcache.mkdir(exist_ok=True)
+    _build_thumbs(items, album, cache, args.thumb, args.prefetch)
+
+    # Capture-date sidecar for sort + date grouping. Re-reading EXIF for every
+    # photo each launch is slow, so cache filename -> datetime in the thumb cache
+    # and only extract ones we haven't recorded yet.
+    dates_path = cache / "dates.json"
+    dates = {}
+    if dates_path.exists():
+        try:
+            dates = json.loads(dates_path.read_text())
+        except Exception:  # noqa: BLE001
+            dates = {}
+    missing = [it for it in items if it["f"] not in dates]
+    if missing:
+        print(f"Reading capture dates for {len(missing)} photo(s) ...")
+        with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
+            for fn, dt in ex.map(lambda it: (it["f"], _exif_dt(album / it["f"])), missing):
+                dates[fn] = dt
+        dates_path.write_text(json.dumps(dates))
+    for it in items:
+        it["dt"] = dates.get(it["f"], "")
+
+    all_names = sorted({n for it in items for n in it["n"]})
+    manifest = {"names": all_names,
+                "items": [{"k": it["k"], "n": it["n"], "h": it["h"], "s": it["s"], "dt": it["dt"]}
+                          for it in items]}
+    page = SERVE_PAGE.replace("__MANIFEST__", json.dumps(manifest))
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):  # quiet: no per-request console spam
+            pass
+
+        def _send(self, code, body, ctype, extra=None):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            from urllib.parse import unquote, urlparse
+            parts = urlparse(self.path)
+            path, query = unquote(parts.path), parts.query
+            if path == "/":
+                self._send(200, page.encode(), "text/html; charset=utf-8")
+            elif path.startswith("/thumb/"):
+                it = by_key.get(path[len("/thumb/"):])
+                f = cache / f"{it['k']}.jpg" if it else None
+                if f and f.exists():
+                    self._send(200, f.read_bytes(), "image/jpeg",
+                               {"Cache-Control": "max-age=3600"})
+                else:
+                    self._send(404, b"not found", "text/plain")
+            elif path.startswith("/full/"):
+                it = by_key.get(path[len("/full/"):])
+                src = (album / it["f"]) if it else None
+                if not (src and src.exists()):
+                    self._send(404, b"not found", "text/plain")
+                elif "full=1" in query:                # full res: rare path, decode each time
+                    img = load_image_rgb_pil(src)
+                    buf = io.BytesIO()
+                    img.save(buf, "JPEG", quality=90)
+                    self._send(200, buf.getvalue(), "image/jpeg",
+                               {"Cache-Control": "max-age=3600"})
+                else:                                  # 2048px preview: build once to disk, then serve cached
+                    pf = pcache / f"{it['k']}.jpg"
+                    if not pf.exists():
+                        img = load_image_rgb_pil(src)
+                        img.thumbnail((2048, 2048))
+                        tmp = pf.with_suffix(f".{threading.get_ident()}.tmp")   # per-thread temp; atomic rename so a concurrent reader never sees a partial file
+                        img.save(tmp, "JPEG", quality=90)
+                        os.replace(tmp, pf)
+                    self._send(200, pf.read_bytes(), "image/jpeg",
+                               {"Cache-Control": "max-age=3600"})
+            else:
+                self._send(404, b"not found", "text/plain")
+
+        def do_POST(self):
+            from urllib.parse import urlparse
+            if urlparse(self.path).path != "/export":
+                self._send(404, b"not found", "text/plain")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                req = json.loads(self.rfile.read(length) or b"{}")
+                keys = [k for k in req.get("keys", []) if k in by_key]   # validate against known set
+                fmt = "jpeg" if req.get("fmt") == "jpeg" else "orig"
+            except Exception as e:  # noqa: BLE001
+                self._send(400, str(e).encode(), "text/plain")
+                return
+
+            # Stream via a temp file so a large selection isn't held in RAM.
+            # Images are already compressed, so ZIP_STORED (no recompress) is fastest.
+            tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+            try:
+                with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:
+                    for k in keys:
+                        it = by_key[k]
+                        src = album / it["f"]
+                        if not src.exists():
+                            continue
+                        if fmt == "jpeg":
+                            img = load_image_rgb_pil(src)
+                            img.thumbnail((2048, 2048))
+                            buf = io.BytesIO()
+                            img.save(buf, "JPEG", quality=90)   # drops EXIF/GPS
+                            z.writestr(f"{it['k']}.jpg", buf.getvalue())
+                        else:
+                            z.write(src, it["f"])
+                tmp.flush()
+                size = tmp.tell()
+                tmp.seek(0)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Content-Disposition", 'attachment; filename="headcount_export.zip"')
+                self.end_headers()
+                shutil.copyfileobj(tmp, self.wfile)
+            finally:
+                tmp.close()
+                Path(tmp.name).unlink(missing_ok=True)
+
+    class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+
+    httpd = Server((args.host, args.port), Handler)
+    url = f"http://{args.host}:{args.port}/"
+    print(f"\n  headcount browsing {len(items)} photos, {len(all_names)} names")
+    print(f"  serving at {url}  (Ctrl-C to stop)\n")
+    if not args.no_open:
+        webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped.")
+    finally:
+        httpd.server_close()
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1094,6 +1752,18 @@ def main() -> int:
     p_scn.add_argument("--limit", type=int, default=0, help="only first N images (for testing)")
     p_scn.add_argument("--prefetch", type=int, default=4, help="background decode threads (default: 4)")
     p_scn.set_defaults(func=cmd_scene)
+
+    p_srv = sub.add_parser("serve", help="local web browser: name/time filters + zip export (localhost only)")
+    p_srv.add_argument("--album", default="album", help="album folder (default: album/)")
+    p_srv.add_argument("--image-people", default="image_people.csv", help="index from `assign`")
+    p_srv.add_argument("--scene", default="scene.csv", help="scene/hour index from `scene` (optional)")
+    p_srv.add_argument("--cache", default=".serve_cache", help="thumbnail cache dir (default: .serve_cache/)")
+    p_srv.add_argument("--thumb", type=int, default=768, help="thumbnail long edge in px (default: 768)")
+    p_srv.add_argument("--prefetch", type=int, default=4, help="background decode threads for thumbs (default: 4)")
+    p_srv.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1 — localhost only)")
+    p_srv.add_argument("--port", type=int, default=8765, help="port (default: 8765)")
+    p_srv.add_argument("--no-open", action="store_true", help="don't auto-open a browser tab")
+    p_srv.set_defaults(func=cmd_serve)
 
     args = ap.parse_args()
 
