@@ -522,8 +522,8 @@ def _montage(thumbs: list, size: int, cols: int):
     return canvas
 
 
-def remap_labels_by_face_id(old_face_cluster: dict, old_cluster_name: dict,
-                            new_face_cluster: dict) -> dict:
+def remap_labels_by_face_id(old_face_cluster: dict[str, int], old_cluster_name: dict[int, str],
+                            new_face_cluster: dict[str, int]) -> dict[int, tuple[str, float, int]]:
     """Infer each NEW cluster's name from the OLD labeling, joining on stable
     face_id rather than cluster_id.
 
@@ -544,11 +544,12 @@ def remap_labels_by_face_id(old_face_cluster: dict, old_cluster_name: dict,
     """
     from collections import Counter, defaultdict
 
-    votes: dict = defaultdict(Counter)
+    votes: dict[int, Counter] = defaultdict(Counter)
     for fid, nc in new_face_cluster.items():
         if nc < 0:
             continue
-        name = old_cluster_name.get(old_face_cluster.get(fid))
+        oc = old_face_cluster.get(fid)
+        name = old_cluster_name.get(oc) if oc is not None else None
         if name:
             votes[nc][name] += 1
     out = {}
@@ -748,7 +749,7 @@ def _parse_hours(spec: str) -> set:
     return out
 
 
-def merge_scene_rows(existing: list, new: list) -> list:
+def merge_scene_rows(existing: list[list[str]], new: list[list[str]]) -> list[list[str]]:
     """Merge freshly-classified scene rows into existing ones, keyed by filename
     (column 0); the new row wins on conflict. Returns rows sorted by filename.
 
@@ -806,7 +807,7 @@ def cmd_scene(args) -> int:
         for path in seq:
             hr = _exif_hour(path)
             scene = "outdoor" if hr in hours else "indoor"
-            new_rows.append([rel_key(path, album), hr, "", "", "", scene])
+            new_rows.append([rel_key(path, album), str(hr), "", "", "", scene])
             summary.append((hr, scene))
     else:
         stream = _prefetch(images, args.prefetch, loader=_decode_pil)
@@ -823,7 +824,7 @@ def cmd_scene(args) -> int:
             green_out = (g + s) >= args.thresh
             out_flag = (green_out and hr in hours) if args.method == "both" else green_out
             scene = "outdoor" if out_flag else "indoor"
-            new_rows.append([rel_key(path, album), hr, f"{g:.3f}", f"{s:.3f}", f"{b:.3f}", scene])
+            new_rows.append([rel_key(path, album), str(hr), f"{g:.3f}", f"{s:.3f}", f"{b:.3f}", scene])
             summary.append((hr, scene))
 
     header = ["filename", "hour", "green", "sky", "bright", "scene"]
@@ -1121,7 +1122,7 @@ def cmd_query(args) -> int:
                 from PIL import Image
 
                 dst = _unique_path(out / f"{Path(fn).stem}.jpg")
-                img = Image.open(src)
+                img: Image.Image = Image.open(src)
                 exif = None if args.strip_exif else img.info.get("exif")
                 img = img.convert("RGB")
                 if args.max_size:
@@ -1548,7 +1549,7 @@ buildNames(); hourLabel(); updFill(); render();
 </html>"""
 
 
-def assign_thumb_keys(filenames) -> dict:
+def assign_thumb_keys(filenames: list[str]) -> dict[str, str]:
     """Map each album-relative filename -> a unique, filesystem-safe key used for
     its thumbnail cache file and its /thumb//full URLs in `serve`.
 
@@ -1661,7 +1662,7 @@ def cmd_serve(args) -> int:
     if sp.exists():
         for r in read_face_rows(sp):
             h = r.get("hour")
-            hours[r["filename"]] = int(h) if h not in (None, "") and str(h).isdigit() else None
+            hours[r["filename"]] = int(h) if h and h.isdigit() else None
             scenes[r["filename"]] = r.get("scene") or ""
 
     album = Path(args.album)

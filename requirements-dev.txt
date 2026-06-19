@@ -1,6 +1,8 @@
 # Dev-only tools. Not needed to run the sorter.
 #   pip install -r requirements-dev.txt
 #   ruff check .
+#   mypy            # light type-check gate (config in mypy.ini)
 #   pytest          # or: python tests/test_logic.py  (no pytest needed)
 ruff>=0.14
+mypy>=1.19
 pytest>=8

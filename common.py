@@ -129,7 +129,7 @@ def load_image_bgr(source) -> np.ndarray:
     if isinstance(source, (bytes, bytearray)):
         import io
 
-        img = Image.open(io.BytesIO(source))
+        img: Image.Image = Image.open(io.BytesIO(source))
     else:
         img = Image.open(source)
 
