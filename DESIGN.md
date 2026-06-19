@@ -254,3 +254,40 @@ Empirically the two agreed ~96% on a well-photographed child, disagreeing only i
 the threshold noise band. `enroll.py` survives only as the cold-start
 calibration seeder: a brand-new album has no labeled cluster to anchor on, so
 external reference photos seed the `cluster` readout instead.
+
+## Deferred: persistent name anchors
+
+Re-importing relies on the **face_id remap** (see `review` above): face_ids are
+stable across an append-style re-embed, so a re-cluster's renumbered ids don't
+lose labels — each new cluster inherits the majority name of its faces' prior
+labels. That covers the normal "add more photos" path completely.
+
+A more durable scheme — **persistent name anchors** — was designed and
+deliberately *not* built. The idea generalizes `reference_embeddings.npy` (today a
+single enrolled child) to a `name -> medoid embedding` table over *every* labeled
+kid:
+
+- A builder (`faces.py anchor`, or folded into `assign`) groups faces by name via
+  `labels.csv` + `clusters.csv`, takes each name's medoid embedding (median-like,
+  robust to a few contaminant faces), and writes `name_anchors.npy` +
+  `name_anchors.csv` (gitignored — biometric, like everything else).
+- On a later run, each cluster's medoid is matched to its nearest name anchor by
+  cosine similarity; above the calibrated **0.35** match threshold it's auto-named,
+  below it's flagged as genuinely new for manual labeling.
+
+Where it would pay off *beyond* the face_id remap:
+
+1. **A full re-embed** (`embed --rescan`) renumbers face_ids, so the face_id join
+   breaks entirely — embedding anchors still match by identity.
+2. **Cross-check / blank-filling** — suggest a name (by identity proximity) for a
+   cluster the face_id vote left blank because its faces were mostly old-noise
+   (e.g. a kid who graduates from the noise bucket into a real cluster).
+3. **New-album cold start** that shares children with this one — drop the anchors
+   in and label nothing.
+
+Why deferred: for this album's remaining append-style import(s), the face_id
+remap suffices and the vote already reports purity / flags low-confidence
+clusters, so anchors are insurance against a re-embed and a reusable asset for a
+future album — not load-bearing now. The narrow, cheap slice is the cross-check in
+(2): computable inside `review` from data already in hand (`faces.npy` +
+`clusters.csv.bak` + prior labels), needing no new artifact or workflow step.
