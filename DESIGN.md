@@ -191,6 +191,15 @@ smaller value later looks fine, a larger one stays blurry, with no signal why.
 
 All of these contain biometric data and stay gitignored (see below).
 
+**`filename` is the path relative to `album/`**, POSIX-style — a bare basename
+for a top-level file, a `subdir/name` for one in a subfolder. `album/` is scanned
+recursively so each import can live in its own subfolder, which is what keeps
+reused phone numbers (counter resets hand a new photo an old `IMG_4492.HEIC`)
+from colliding: same basename, different relative path. Because a top-level
+file's relative path equals its basename, artifacts written before subfolders
+existed stay valid with no re-embed. A stray archive in the scanned tree is a hard
+error (`ArchiveFoundError`), not a silent skip.
+
 ## Hard parts (and how they're handled)
 
 - **A kid split across several clusters** (lighting/age/hair) — expected and

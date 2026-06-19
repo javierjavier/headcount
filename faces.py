@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import shutil
 import sys
 from collections import deque
@@ -54,7 +55,15 @@ from pathlib import Path
 
 import numpy as np
 
-from common import build_face_app, empty_hint, list_images, load_image_bgr, load_image_rgb_pil
+from common import (
+    ArchiveFoundError,
+    build_face_app,
+    empty_hint,
+    list_images,
+    load_image_bgr,
+    load_image_rgb_pil,
+    rel_key,
+)
 
 FACES_HEADER = ["face_id", "filename", "x1", "y1", "x2", "y2", "det_score"]
 EMB_DIM = 512
@@ -227,7 +236,7 @@ def cmd_embed(args) -> int:
     album = Path(args.album)
     try:
         images = list_images(album)
-    except (FileNotFoundError, NotADirectoryError) as e:
+    except (FileNotFoundError, NotADirectoryError, ArchiveFoundError) as e:
         print(e, file=sys.stderr)
         return 1
     if not images:
@@ -246,7 +255,7 @@ def cmd_embed(args) -> int:
     # Resume skip set: images that produced a face (faces.csv) OR were recorded
     # as processed (the .done manifest, which also covers zero-face images).
     done = read_face_filenames(faces_csv) | read_done_manifest(done_path)
-    todo = [p for p in images if p.name not in done]
+    todo = [p for p in images if rel_key(p, album) not in done]
 
     if args.limit:
         todo = todo[: args.limit]
@@ -294,18 +303,19 @@ def cmd_embed(args) -> int:
                 except Exception as e:  # noqa: BLE001 - keep going on a bad image
                     print(f"\n  ! {path.name}: {e}")
                     faces = []
+            key = rel_key(path, album)  # album-relative path; basename for top-level files
             for face in faces:
                 x1, y1, x2, y2 = (int(round(v)) for v in face.bbox)
                 emb = face.normed_embedding.astype(np.float32)
                 writer.writerow(
-                    [face_id, path.name, x1, y1, x2, y2, f"{float(face.det_score):.4f}"]
+                    [face_id, key, x1, y1, x2, y2, f"{float(face.det_score):.4f}"]
                 )
                 ef.write(emb.tobytes())
                 face_id += 1
                 n_faces += 1
             cf.flush()
             ef.flush()
-            df.write(path.name + "\n")
+            df.write(key + "\n")
             df.flush()
 
     print(f"\nEmbedded {n_faces} face(s) from {len(todo)} image(s) -> {faces_csv}")
@@ -559,7 +569,7 @@ def cmd_review(args) -> int:
         if isinstance(img, Exception):
             print(f"\n  ! {path.name}: {img}")
             continue
-        for cid, r in need[path.name]:
+        for cid, r in need[rel_key(path, album)]:
             box = (int(r["x1"]), int(r["y1"]), int(r["x2"]), int(r["y2"]))
             crops.setdefault(cid, []).append((_face_size(r), _square_thumb(img.crop(box), args.thumb)))
 
@@ -664,12 +674,12 @@ def cmd_scene(args) -> int:
     album = Path(args.album)
     try:
         images = list_images(album)
-    except (FileNotFoundError, NotADirectoryError) as e:
+    except (FileNotFoundError, NotADirectoryError, ArchiveFoundError) as e:
         print(e, file=sys.stderr)
         return 1
     if args.faces and Path(args.faces).exists():
         wanted = {r["filename"] for r in read_face_rows(Path(args.faces))}
-        images = [p for p in images if p.name in wanted]
+        images = [p for p in images if rel_key(p, album) in wanted]
     if args.limit:
         images = images[: args.limit]
     if not images:
@@ -697,7 +707,7 @@ def cmd_scene(args) -> int:
             for path in seq:
                 hr = _exif_hour(path)
                 scene = "outdoor" if hr in hours else "indoor"
-                w.writerow([path.name, hr, "", "", "", scene])
+                w.writerow([rel_key(path, album), hr, "", "", "", scene])
                 rows.append((hr, scene))
         else:
             stream = _prefetch(images, args.prefetch, loader=_decode_pil)
@@ -714,7 +724,7 @@ def cmd_scene(args) -> int:
                 green_out = (g + s) >= args.thresh
                 out_flag = (green_out and hr in hours) if args.method == "both" else green_out
                 scene = "outdoor" if out_flag else "indoor"
-                w.writerow([path.name, hr, f"{g:.3f}", f"{s:.3f}", f"{b:.3f}", scene])
+                w.writerow([rel_key(path, album), hr, f"{g:.3f}", f"{s:.3f}", f"{b:.3f}", scene])
                 rows.append((hr, scene))
 
     from collections import Counter
@@ -755,7 +765,10 @@ def _materialize(filenames, name: str, album: Path, base: Path, copy: bool) -> i
         src = (album / fn).resolve()
         if not src.exists():
             continue
-        dst = _unique_path(d / fn)
+        # fn may be a subfolder-relative path; flatten to the basename so each
+        # child's folder stays flat, and let _unique_path break basename clashes
+        # between subfolders (e.g. two reused IMG_4492.HEIC).
+        dst = _unique_path(d / Path(fn).name)
         try:
             if copy:
                 shutil.copy2(src, dst)
@@ -972,11 +985,15 @@ def cmd_query(args) -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     album = Path(args.album)
+    from common import _unique_path
+
     n = 0
     for fn in selected:
         src = (album / fn).resolve()
         if not src.exists():
             continue
+        # Flatten subfolder-relative names to a basename in the output dir, and
+        # dedup basename clashes between subfolders so neither is shadowed.
         try:
             if args.jpeg:
                 # Re-encode to JPEG. macOS Finder thumbnails HEIC unreliably
@@ -986,7 +1003,7 @@ def cmd_query(args) -> int:
                 # stay together, and copy EXIF verbatim unless stripped.
                 from PIL import Image
 
-                dst = out / f"{Path(fn).stem}.jpg"
+                dst = _unique_path(out / f"{Path(fn).stem}.jpg")
                 img = Image.open(src)
                 exif = None if args.strip_exif else img.info.get("exif")
                 img = img.convert("RGB")
@@ -997,9 +1014,9 @@ def cmd_query(args) -> int:
                     save_kw["exif"] = exif
                 img.save(dst, "JPEG", **save_kw)
             elif args.copy:
-                shutil.copy2(src, out / fn)
+                shutil.copy2(src, _unique_path(out / Path(fn).name))
             else:
-                (out / fn).symlink_to(src)
+                (_unique_path(out / Path(fn).name)).symlink_to(src)
             n += 1
         except Exception as e:  # noqa: BLE001 - one bad file shouldn't abort the query
             print(f"  ! {fn}: {e}")
@@ -1414,6 +1431,34 @@ buildNames(); hourLabel(); updFill(); render();
 </html>"""
 
 
+def assign_thumb_keys(filenames) -> dict:
+    """Map each album-relative filename -> a unique, filesystem-safe key used for
+    its thumbnail cache file and its /thumb//full URLs in `serve`.
+
+    A bare stem identifies a photo uniquely ONLY when no other indexed photo
+    shares it. With subfolders two photos can share a stem (a reused
+    IMG_4492.HEIC in different import folders, or IMG_1.HEIC vs IMG_1.JPG); a
+    stem-named cache file would then alias the wrong photo, and a stale thumb
+    from a prior run would be served for the new one. So any stem shared by >1
+    photo is keyed by stem + a short hash of the full path: stable per photo,
+    distinct between the sharers, and distinct from the bare-stem name so stale
+    stem-named cache entries are orphaned rather than reused. Unique stems keep
+    their bare-stem key, so an existing cache stays valid and only genuinely
+    ambiguous thumbs rebuild.
+    """
+    from collections import Counter
+
+    counts = Counter(Path(fn).stem for fn in filenames)
+    keys = {}
+    for fn in filenames:
+        stem = Path(fn).stem
+        if counts[stem] == 1:
+            keys[fn] = stem
+        else:
+            keys[fn] = f"{stem}-{hashlib.sha1(fn.encode()).hexdigest()[:8]}"
+    return keys
+
+
 def _build_thumbs(items, album, cache, size, workers):
     """Pre-render a square-ish JPEG thumbnail per item into *cache* (idempotent).
 
@@ -1492,24 +1537,18 @@ def cmd_serve(args) -> int:
             scenes[r["filename"]] = r.get("scene") or ""
 
     album = Path(args.album)
-    # `k` is a filesystem-safe key (the stem) used for thumb/full URLs and as the
-    # cache filename; `f` is the real album filename used to read original bytes.
-    # Stems can collide (e.g. IMG_1.HEIC vs IMG_1.JPG — the same case _unique_path
-    # guards) — suffix dupes so neither photo gets silently shadowed.
+    # `k` is a filesystem-safe key used for thumb/full URLs and as the cache
+    # filename; `f` is the real album-relative path used to read original bytes.
+    # See assign_thumb_keys for why a bare stem isn't always safe with subfolders.
+    visible = [(fn, names) for fn, names in sorted(people.items())
+               if (album / fn).exists()]
+    keys = assign_thumb_keys([fn for fn, _ in visible])
     items, by_key = [], {}
-    for fn, names in sorted(people.items()):
-        if not (album / fn).exists():
-            continue
-        key = Path(fn).stem
-        if key in by_key:
-            i = 1
-            while f"{key}-{i}" in by_key:
-                i += 1
-            key = f"{key}-{i}"
-        it = {"k": key, "f": fn, "n": names,
+    for fn, names in visible:
+        it = {"k": keys[fn], "f": fn, "n": names,
               "h": hours.get(fn), "s": scenes.get(fn, "")}
         items.append(it)
-        by_key[key] = it
+        by_key[keys[fn]] = it
     if not items:
         print(f"No album files found for the {len(people)} indexed photos under {album}/.", file=sys.stderr)
         return 1

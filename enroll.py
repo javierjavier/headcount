@@ -26,7 +26,7 @@ import sys
 
 import numpy as np
 
-from common import build_face_app, empty_hint, largest_face, list_images, load_image_bgr
+from common import ArchiveFoundError, build_face_app, empty_hint, largest_face, list_images, load_image_bgr
 
 
 def main() -> int:
@@ -43,7 +43,7 @@ def main() -> int:
 
     try:
         images = list_images(args.reference)
-    except (FileNotFoundError, NotADirectoryError) as e:
+    except (FileNotFoundError, NotADirectoryError, ArchiveFoundError) as e:
         print(e, file=sys.stderr)
         return 1
     if not images:

@@ -29,6 +29,9 @@ otherwise be fed in sideways and fail to detect).
 
 ```
 album/       # [PUT THE FULL SET OF PHOTOS HERE]
+             #   scanned recursively, so you can drop each batch in its own
+             #   subfolder (album/2026-spring/, album/photos-3/, ...). A stray
+             #   archive left in album/ is a hard error — unzip into a subfolder.
 reference/   # optional: a few clear photos of one known child, used only for
              #   cold-start cluster calibration (see enroll below)
 clusters/    # created by `review` — one montage per cluster, for labeling
@@ -154,18 +157,30 @@ machine — a lone onnxruntime process plus the OS scheduler already oversubscri
 the cores — so that path was removed rather than left in as a tempting
 non-speedup.
 
-To add photos later: drop them in `album/`, then re-run `embed` (skips
-already-done files), `cluster`, and `assign`. Resume tracks done images in a
-`faces.done` manifest (one filename per line) alongside `faces.csv`/`.npy`/`.emb`.
-`faces.csv` only lists images that yielded a face, so the manifest is what lets a
-re-run also skip images where *no* face was detected — otherwise those would be
-re-decoded every time. It's generated and gitignored; delete it (or use `embed
---rescan`) only if you want a clean rebuild.
+To add photos later: drop the new batch into **its own subfolder** under
+`album/` (e.g. `album/photos-3/`), then re-run `embed` (skips already-done
+files), `cluster`, and `assign`. Resume tracks done images in a `faces.done`
+manifest (one path per line) alongside `faces.csv`/`.npy`/`.emb`. `faces.csv`
+only lists images that yielded a face, so the manifest is what lets a re-run also
+skip images where *no* face was detected — otherwise those would be re-decoded
+every time. It's generated and gitignored; delete it (or use `embed --rescan`)
+only if you want a clean rebuild.
 
-The skip logic keys on **filename**. Within one phone's library names are unique,
-so this is safe. If new photos come from *multiple* phones, two images could share
-a name (e.g. `IMG_1234.HEIC`) and the second would be skipped; Google's downloads
-de-dup clashes with a `(1)` suffix, so this is rare.
+The skip logic keys on the image's path **relative to `album/`** (e.g.
+`photos-3/IMG_4492.HEIC`), not its bare basename. This is why subfolders matter:
+phone counters reset and reuse old numbers, so a brand-new photo can arrive named
+`IMG_4492.HEIC` while an unrelated older `IMG_4492.HEIC` already sits in the
+album. Same basename, *different* relative path → no collision, no silent skip,
+no overwrite. Drop each import in a fresh subfolder and reused numbers never
+clash. (A top-level file's relative path *is* its basename, so artifacts written
+before subfolders existed keep matching — no re-embed.) `query` and
+`assign --folders` flatten these back to basenames in their output dirs, deduping
+any clash with a `_1`/`_2` suffix.
+
+If you leave a downloaded `.zip` (or other archive) sitting in `album/`, the
+tools stop with an error telling you to unzip it into a subfolder and remove the
+archive — rather than silently skipping every photo packed inside it. Videos and
+other non-image files in a subfolder are simply ignored.
 
 ## Files
 

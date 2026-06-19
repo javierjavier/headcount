@@ -17,6 +17,8 @@ clusters*.csv
 labels*.csv
 image_people*.csv
 scene*.csv
+# backups of the above (review/cluster write *.bak) — same biometric content
+*.bak
 embed_full.log
 clusters*/
 by_child*/

@@ -126,6 +126,39 @@ def test_list_images_file_not_dir_raises_friendly(tmp_path):
         raise AssertionError("expected NotADirectoryError when pointed at a file")
 
 
+def test_list_images_recurses_into_subfolders(tmp_path):
+    # Subfolder images are found alongside top-level ones; dot-dirs are skipped.
+    (tmp_path / "top.heic").write_bytes(b"")
+    sub = tmp_path / "photos-3"
+    sub.mkdir()
+    (sub / "IMG_4492.HEIC").write_bytes(b"")
+    cache = tmp_path / ".serve_cache"
+    cache.mkdir()
+    (cache / "x.jpg").write_bytes(b"")  # dot-dir contents must not leak in
+    got = sorted(common.rel_key(p, tmp_path) for p in common.list_images(tmp_path))
+    assert got == ["photos-3/IMG_4492.HEIC", "top.heic"]
+
+
+def test_list_images_raises_on_archive_in_tree(tmp_path):
+    # A stray zip alongside real images must hard-stop, not be silently skipped.
+    (tmp_path / "a.heic").write_bytes(b"")
+    (tmp_path / "Photos-3-001.zip").write_bytes(b"PK\x03\x04")
+    try:
+        common.list_images(tmp_path)
+    except common.ArchiveFoundError as e:
+        assert "Photos-3-001.zip" in str(e) and "subfolder" in str(e)
+    else:
+        raise AssertionError("expected ArchiveFoundError for a stray archive")
+
+
+def test_rel_key_toplevel_equals_basename(tmp_path):
+    # Migration hinge: a top-level file's key is its bare basename, so artifacts
+    # written before subfolders existed keep matching (no re-embed). Subfolder
+    # files get a POSIX-style prefix, which is what defeats basename collisions.
+    assert common.rel_key(tmp_path / "IMG_1.HEIC", tmp_path) == "IMG_1.HEIC"
+    assert common.rel_key(tmp_path / "sub" / "IMG_1.HEIC", tmp_path) == "sub/IMG_1.HEIC"
+
+
 # --- empty_hint ------------------------------------------------------------
 
 def test_empty_hint_flags_archive(tmp_path):
@@ -266,6 +299,38 @@ def test_read_labels_skips_blank_names(tmp_path):
         w.writerow(["cluster_id", "size", "montage", "name"])
         w.writerows([["5", "100", "c00.jpg", "Ada"], ["6", "80", "c01.jpg", ""]])
     assert faces._read_labels(lp) == {5: "Ada"}
+
+
+# --- serve thumbnail keys --------------------------------------------------
+
+def test_thumb_keys_unique_stems_stay_bare():
+    # No collisions -> bare stems, so an existing stem-named cache stays valid.
+    keys = faces.assign_thumb_keys(["IMG_1.HEIC", "sub/IMG_2.HEIC", "a/b/IMG_3.jpg"])
+    assert keys == {"IMG_1.HEIC": "IMG_1", "sub/IMG_2.HEIC": "IMG_2", "a/b/IMG_3.jpg": "IMG_3"}
+
+
+def test_thumb_keys_shared_stem_disambiguated_and_unique():
+    # A reused IMG_4492.HEIC across import folders: both must get distinct keys,
+    # and neither may keep the bare stem (which a stale cache file could alias).
+    fns = ["IMG_4492.HEIC", "20260618/IMG_4492.HEIC"]
+    keys = faces.assign_thumb_keys(fns)
+    assert keys["IMG_4492.HEIC"] != keys["20260618/IMG_4492.HEIC"]
+    assert all(k != "IMG_4492" and k.startswith("IMG_4492-") for k in keys.values())
+    assert len(set(keys.values())) == 2  # collision-free
+
+
+def test_thumb_keys_same_stem_different_ext_also_split():
+    # IMG_1.HEIC vs IMG_1.JPG share a stem in one folder -> still disambiguated.
+    keys = faces.assign_thumb_keys(["IMG_1.HEIC", "IMG_1.JPG"])
+    assert len(set(keys.values())) == 2
+    assert all(k.startswith("IMG_1-") for k in keys.values())
+
+
+def test_thumb_keys_stable_across_runs():
+    # Keys are a pure function of the filename set -> deterministic (a cache built
+    # one run is still addressable the next).
+    fns = ["IMG_4492.HEIC", "20260618/IMG_4492.HEIC", "lone.png"]
+    assert faces.assign_thumb_keys(fns) == faces.assign_thumb_keys(list(reversed(fns)))
 
 
 # --- standalone runner (no pytest) -----------------------------------------

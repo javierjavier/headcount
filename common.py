@@ -29,6 +29,28 @@ IMAGE_EXTS = {".heic", ".heif", ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif"
 ARCHIVE_EXTS = {".zip", ".tar", ".gz", ".tgz", ".7z", ".rar"}
 
 
+class ArchiveFoundError(Exception):
+    """An un-extracted archive was found under a folder being scanned for images.
+
+    Raised instead of silently ignoring it: a stray zip almost always means
+    photos that *should* be processed are still packed up. The caller catches
+    this and prints the (already-friendly) message.
+    """
+
+
+def rel_key(path: str | Path, root: str | Path) -> str:
+    """Identity key for an album file: its path relative to the album root,
+    POSIX-style (forward slashes, stable across OSes and inside CSVs).
+
+    For a file sitting directly in the album this is just its basename, so
+    artifacts written before subfolders existed (which stored basenames) keep
+    matching without a re-embed. A file in a subfolder gets a `subdir/...`
+    prefix, which is what lets two photos share a basename across subfolders
+    (e.g. a reused `IMG_4492.HEIC`) without colliding.
+    """
+    return Path(path).relative_to(root).as_posix()
+
+
 def empty_hint(folder: str | Path) -> str:
     """Extra hint for a 'no images found' message, or '' if none applies.
 
@@ -46,12 +68,20 @@ def empty_hint(folder: str | Path) -> str:
 
 
 def list_images(folder: str | Path) -> list[Path]:
-    """Return image files in *folder*, sorted, case-insensitive on extension.
+    """Return image files anywhere under *folder* (recursively), sorted,
+    case-insensitive on extension. Dotfiles and dot-directories (`.DS_Store`,
+    `.serve_cache/`, …) are skipped.
+
+    Recursion is what makes subfolders work: drop a batch into
+    `album/<name>/` and its images are found alongside the top-level ones.
+    Paths are returned in full; pair with `rel_key(p, folder)` for the
+    album-relative identity key the pipeline stores.
 
     Raises a friendly FileNotFoundError / NotADirectoryError if *folder* is
-    missing or is actually a file — the two most common first-run mistakes
-    (typo'd path, forgot to populate album/, or pointed at a downloaded zip),
-    which would otherwise surface as a bare iterdir() traceback.
+    missing or is actually a file, and ArchiveFoundError if an un-extracted
+    archive is sitting in the tree — the common mistakes (typo'd path, forgot
+    to populate album/, or dropped a downloaded zip straight in) — which would
+    otherwise surface as a bare traceback or silently skip packed-up photos.
     """
     folder = Path(folder)
     if not folder.exists():
@@ -63,7 +93,31 @@ def list_images(folder: str | Path) -> list[Path]:
             f"{folder} is a file, not a folder. Point this at a directory of photos "
             "(unzip an archive first if you downloaded one)."
         )
-    return sorted(p for p in folder.iterdir() if p.suffix.lower() in IMAGE_EXTS)
+    images: list[Path] = []
+    archives: list[Path] = []
+    for p in folder.rglob("*"):
+        rel = p.relative_to(folder)
+        if any(part.startswith(".") for part in rel.parts):
+            continue  # skip dotfiles / dot-dirs (.DS_Store, .serve_cache, ...)
+        if not p.is_file():
+            continue
+        ext = p.suffix.lower()
+        if ext in IMAGE_EXTS:
+            images.append(p)
+        elif ext in ARCHIVE_EXTS:
+            archives.append(p)
+    if archives:
+        shown = ", ".join(sorted(a.relative_to(folder).as_posix() for a in archives)[:3])
+        first = sorted(a.stem for a in archives)[0]
+        raise ArchiveFoundError(
+            f"Found an un-extracted archive under {folder}/ ({shown}). Unzip it into "
+            f"its own subfolder, then remove the archive and re-run -- e.g.\n"
+            f"    mkdir {folder}/{first} && unzip '{folder}/{first}.zip' -d {folder}/{first}\n"
+            f"    rm '{folder}/{first}.zip'\n"
+            f"Leaving the archive in {folder}/ would skip every photo packed inside it. "
+            f"(Non-image files in the subfolder, e.g. .mp4 videos, are ignored.)"
+        )
+    return sorted(images)
 
 
 def load_image_bgr(source) -> np.ndarray:
