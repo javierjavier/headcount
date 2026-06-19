@@ -656,6 +656,7 @@ def cmd_review(args) -> int:
     # kids on top), and a skeleton labels.csv to type names into.
     written = 0
     report = []  # (cid, name, purity|None) for the carried-forward summary
+    kept = set()  # montage filenames written this run, to sweep stale ones below
     with labels_path.open("w", newline="") as lf:
         w = csv.writer(lf)
         w.writerow(["cluster_id", "size", "montage", "name"])
@@ -666,6 +667,7 @@ def cmd_review(args) -> int:
             thumbs = [t for _, t in sorted(thumbs, key=lambda x: -x[0])]
             montage = f"c{rank:02d}__cluster{cid}__n{len(fr)}.jpg"
             _montage(thumbs, args.thumb, args.cols).save(out_dir / montage, "JPEG", quality=85)
+            kept.add(montage)
             if remap is not None:
                 name, purity, _ = remap.get(cid, ("", None, 0))
             else:
@@ -674,7 +676,18 @@ def cmd_review(args) -> int:
             report.append((cid, name, purity))
             written += 1
 
+    # Re-clustering renumbers clusters, so a prior run's montages (different rank,
+    # cid, or face count in the name) linger and clutter the folder you label in.
+    # Sweep any montage-pattern file we didn't just write — same idea as serve's
+    # thumbnail stale-sweep. Glob is specific to our `c..__cluster..__n..jpg`
+    # names, so it never touches unrelated files a user dropped in the folder.
+    stale = [p for p in out_dir.glob("c*__cluster*__n*.jpg") if p.name not in kept]
+    for p in stale:
+        p.unlink()
+
     print(f"\nWrote {written} cluster montage(s) -> {out_dir}/ and skeleton -> {labels_path}")
+    if stale:
+        print(f"Removed {len(stale)} stale montage(s) from a prior run.")
     carried = sum(1 for _, n, _ in report if n)
     if remap is not None:
         print(f"Carried {carried} name(s) forward by face_id vote (robust to re-cluster renumbering).")
