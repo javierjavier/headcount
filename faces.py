@@ -422,6 +422,16 @@ def cmd_cluster(args) -> int:
     full[idx] = labels
 
     out = Path(args.out)
+    # Back up the prior membership before overwriting. Re-clustering renumbers
+    # HDBSCAN ids, so the next `review` needs the OLD face_id->cluster map to carry
+    # labels forward by identity (see remap_labels_by_face_id). A single rolling
+    # backup is enough: it holds the clustering the current labels.csv was made
+    # against. (clusters.csv is regenerable, unlike hand-typed labels, so no need
+    # for _unique_path history here.)
+    if out.exists():
+        backup = out.with_suffix(out.suffix + ".bak")
+        shutil.copy2(out, backup)
+        print(f"Backed up prior {out} -> {backup} (lets `review` remap labels by face_id).")
     with out.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["face_id", "cluster_id"])
@@ -512,6 +522,42 @@ def _montage(thumbs: list, size: int, cols: int):
     return canvas
 
 
+def remap_labels_by_face_id(old_face_cluster: dict, old_cluster_name: dict,
+                            new_face_cluster: dict) -> dict:
+    """Infer each NEW cluster's name from the OLD labeling, joining on stable
+    face_id rather than cluster_id.
+
+    HDBSCAN renumbers cluster ids whenever the face set changes, so carrying a
+    name by cluster_id can silently put it on a different person after a
+    re-cluster. face_id is stable, so instead we look at each new cluster's member
+    faces, find what they were named before, and take the majority.
+
+    Args:
+        old_face_cluster: face_id -> cluster_id from the PRIOR clusters.csv.
+        old_cluster_name: cluster_id -> name from the PRIOR labels.csv (named only).
+        new_face_cluster: face_id -> cluster_id from the CURRENT clusters.csv.
+
+    Returns {new_cluster_id: (name, purity, n_named)} where purity is the winning
+    name's share among the new cluster's faces that *had* a name before, and
+    n_named is how many voted. A new cluster with no previously-named faces is
+    absent (it's new or junk -> left blank for manual labeling).
+    """
+    from collections import Counter, defaultdict
+
+    votes: dict = defaultdict(Counter)
+    for fid, nc in new_face_cluster.items():
+        if nc < 0:
+            continue
+        name = old_cluster_name.get(old_face_cluster.get(fid))
+        if name:
+            votes[nc][name] += 1
+    out = {}
+    for nc, counter in votes.items():
+        name, n = counter.most_common(1)[0]
+        out[nc] = (name, n / sum(counter.values()), sum(counter.values()))
+    return out
+
+
 def cmd_review(args) -> int:
     faces_csv = Path(args.faces)
     rows = read_face_rows(faces_csv)
@@ -575,12 +621,17 @@ def cmd_review(args) -> int:
 
     # Labeling is the one piece of hand work in the pipeline, and re-running
     # review (e.g. after a re-cluster) would otherwise overwrite labels.csv with
-    # an empty skeleton. Carry any names you've already typed forward by
-    # cluster_id, and back up the old file before rewriting so nothing is lost
-    # even if some cluster_ids changed. (Cluster ids are stable only within one
-    # clusters.csv; names for ids that no longer exist survive only in the backup.)
+    # an empty skeleton. So carry the names you've already typed forward, and back
+    # up the old file before rewriting so nothing is lost.
+    #
+    # Cluster ids are NOT stable across a re-cluster (HDBSCAN renumbers), so a
+    # by-id carry can mislabel. When the prior membership is available (cluster
+    # backs up clusters.csv -> .bak), carry by face_id majority vote instead —
+    # robust to renumbering — and report the vote purity so any uncertain remap is
+    # visible. Falls back to by-id only on a first run with no backup.
     labels_path = Path(args.labels)
     prior_names = _read_labels(labels_path)
+    remap = None
     if prior_names:
         from common import _unique_path
 
@@ -588,10 +639,22 @@ def cmd_review(args) -> int:
         shutil.copy2(labels_path, backup)
         print(f"Existing {labels_path} has {len(prior_names)} name(s); backed it up -> {backup}")
 
+        clusters_bak = clu_path.with_suffix(clu_path.suffix + ".bak")
+        if clusters_bak.exists():
+            # Keep face_id as a str key to match `assign` (load_cluster_map ->
+            # dict[str, int]); int-keying here would silently never join.
+            with clusters_bak.open() as bf:
+                old_assign = {r["face_id"]: int(r["cluster_id"])
+                              for r in csv.DictReader(bf)}
+            remap = remap_labels_by_face_id(old_assign, prior_names, assign)
+        else:
+            print(f"  (no {clusters_bak} — carrying names by cluster_id; re-run after "
+                  "`cluster` for an identity-stable remap.)")
+
     # Build one montage per cluster, biggest clusters first (most-photographed
     # kids on top), and a skeleton labels.csv to type names into.
     written = 0
-    written_cids: set[int] = set()
+    report = []  # (cid, name, purity|None) for the carried-forward summary
     with labels_path.open("w", newline="") as lf:
         w = csv.writer(lf)
         w.writerow(["cluster_id", "size", "montage", "name"])
@@ -600,20 +663,35 @@ def cmd_review(args) -> int:
             if not thumbs:
                 continue
             thumbs = [t for _, t in sorted(thumbs, key=lambda x: -x[0])]
-            name = f"c{rank:02d}__cluster{cid}__n{len(fr)}.jpg"
-            _montage(thumbs, args.thumb, args.cols).save(out_dir / name, "JPEG", quality=85)
-            w.writerow([cid, len(fr), name, prior_names.get(cid, "")])
-            written_cids.add(cid)
+            montage = f"c{rank:02d}__cluster{cid}__n{len(fr)}.jpg"
+            _montage(thumbs, args.thumb, args.cols).save(out_dir / montage, "JPEG", quality=85)
+            if remap is not None:
+                name, purity, _ = remap.get(cid, ("", None, 0))
+            else:
+                name, purity = prior_names.get(cid, ""), None
+            w.writerow([cid, len(fr), montage, name])
+            report.append((cid, name, purity))
             written += 1
 
-    carried = sum(1 for cid in prior_names if cid in written_cids)
-    lost = sorted(cid for cid in prior_names if cid not in written_cids)
     print(f"\nWrote {written} cluster montage(s) -> {out_dir}/ and skeleton -> {labels_path}")
-    if carried:
+    carried = sum(1 for _, n, _ in report if n)
+    if remap is not None:
+        print(f"Carried {carried} name(s) forward by face_id vote (robust to re-cluster renumbering).")
+        low = [(cid, n, p) for cid, n, p in report if n and p is not None and p < 0.90]
+        if low:
+            print(f"  ! {len(low)} cluster(s) labeled with <90% vote agreement — eyeball the montage:")
+            for cid, n, p in low:
+                print(f"      cluster {cid}: {n} ({p:.0%})")
+        dropped = sorted(set(prior_names.values()) - {n for _, n, _ in report if n})
+        if dropped:
+            print(f"  ! prior name(s) not matched to any cluster this run: {', '.join(dropped)} "
+                  f"(still in {backup}).")
+    elif prior_names:
         print(f"Carried forward {carried} existing name(s) by cluster_id.")
-    if lost:
-        print(f"  ! {len(lost)} prior name(s) were for cluster id(s) not in this run "
-              f"({', '.join(map(str, lost))}); they remain only in the backup.")
+        lost = sorted(set(prior_names) - {cid for cid, _, _ in report})
+        if lost:
+            print(f"  ! {len(lost)} prior name(s) were for cluster id(s) not in this run "
+                  f"({', '.join(map(str, lost))}); they remain only in the backup.")
     print("Open the montages (biggest clusters are c00, c01, ...), then type a name in\n"
           f"the 'name' column of {labels_path} for each. Same kid in two clusters? Same name.")
     return 0
@@ -670,6 +748,20 @@ def _parse_hours(spec: str) -> set:
     return out
 
 
+def merge_scene_rows(existing: list, new: list) -> list:
+    """Merge freshly-classified scene rows into existing ones, keyed by filename
+    (column 0); the new row wins on conflict. Returns rows sorted by filename.
+
+    This is what lets `scene --subdir 20260618` re-tag only that import's photos —
+    which may have a different outdoor block than earlier batches — and merge the
+    result back into scene.csv without disturbing the other batches' rows.
+    """
+    by_fn = {r[0]: r for r in existing}
+    for r in new:
+        by_fn[r[0]] = r
+    return [by_fn[k] for k in sorted(by_fn)]
+
+
 def cmd_scene(args) -> int:
     album = Path(args.album)
     try:
@@ -680,6 +772,15 @@ def cmd_scene(args) -> int:
     if args.faces and Path(args.faces).exists():
         wanted = {r["filename"] for r in read_face_rows(Path(args.faces))}
         images = [p for p in images if rel_key(p, album) in wanted]
+    # --subdir scopes classification to one import folder (album/<subdir>/) and
+    # merges into scene.csv, so a batch whose outdoor block differs from earlier
+    # ones can be re-tagged without re-tagging (and mis-tagging) the rest.
+    if args.subdir:
+        pref = args.subdir.strip("/") + "/"
+        images = [p for p in images if rel_key(p, album).startswith(pref)]
+        if not images:
+            print(f"No images under album/{pref} (in the face table?).", file=sys.stderr)
+            return 1
     if args.limit:
         images = images[: args.limit]
     if not images:
@@ -688,49 +789,65 @@ def cmd_scene(args) -> int:
 
     hours = _parse_hours(args.outdoor_hours)
     out = Path(args.out)
-    rows = []
+    new_rows = []   # full csv rows just classified
+    summary = []    # (hour, scene) for the by-hour readout
 
     # 'time' needs no pixels — just the EXIF hour — so it skips decode entirely
     # (instant). 'green' and 'both' decode for the foliage/sky colour signal.
     # 'both' = outdoor only if the colour says so AND it's in the outdoor window
     # (rejects green classroom decor at non-outdoor hours).
+    if args.method == "time":
+        seq = images
+        try:
+            from tqdm import tqdm
+            seq = tqdm(images, unit="img", desc="scene(time)")
+        except ImportError:
+            pass
+        for path in seq:
+            hr = _exif_hour(path)
+            scene = "outdoor" if hr in hours else "indoor"
+            new_rows.append([rel_key(path, album), hr, "", "", "", scene])
+            summary.append((hr, scene))
+    else:
+        stream = _prefetch(images, args.prefetch, loader=_decode_pil)
+        try:
+            from tqdm import tqdm
+            stream = tqdm(stream, total=len(images), unit="img", desc="scene")
+        except ImportError:
+            pass
+        for path, im in stream:
+            if isinstance(im, Exception):
+                continue
+            g, s, b = _scene_stats(im)
+            hr = _exif_hour(path)
+            green_out = (g + s) >= args.thresh
+            out_flag = (green_out and hr in hours) if args.method == "both" else green_out
+            scene = "outdoor" if out_flag else "indoor"
+            new_rows.append([rel_key(path, album), hr, f"{g:.3f}", f"{s:.3f}", f"{b:.3f}", scene])
+            summary.append((hr, scene))
+
+    header = ["filename", "hour", "green", "sky", "bright", "scene"]
+    note = ""
+    if args.subdir and out.exists():
+        with out.open() as f:
+            rd = csv.reader(f)
+            next(rd, None)
+            existing = [r for r in rd if r]
+        final_rows = merge_scene_rows(existing, new_rows)
+        note = f" (merged batch into {len(final_rows)} total rows)"
+    else:
+        final_rows = new_rows
     with out.open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["filename", "hour", "green", "sky", "bright", "scene"])
-        if args.method == "time":
-            seq = images
-            try:
-                from tqdm import tqdm
-                seq = tqdm(images, unit="img", desc="scene(time)")
-            except ImportError:
-                pass
-            for path in seq:
-                hr = _exif_hour(path)
-                scene = "outdoor" if hr in hours else "indoor"
-                w.writerow([rel_key(path, album), hr, "", "", "", scene])
-                rows.append((hr, scene))
-        else:
-            stream = _prefetch(images, args.prefetch, loader=_decode_pil)
-            try:
-                from tqdm import tqdm
-                stream = tqdm(stream, total=len(images), unit="img", desc="scene")
-            except ImportError:
-                pass
-            for path, im in stream:
-                if isinstance(im, Exception):
-                    continue
-                g, s, b = _scene_stats(im)
-                hr = _exif_hour(path)
-                green_out = (g + s) >= args.thresh
-                out_flag = (green_out and hr in hours) if args.method == "both" else green_out
-                scene = "outdoor" if out_flag else "indoor"
-                w.writerow([rel_key(path, album), hr, f"{g:.3f}", f"{s:.3f}", f"{b:.3f}", scene])
-                rows.append((hr, scene))
+        w.writerow(header)
+        w.writerows(final_rows)
 
     from collections import Counter
 
-    sc = Counter(s for _, s in rows)
-    print(f"\n{len(rows)} images -> {out}: {sc.get('outdoor',0)} outdoor, {sc.get('indoor',0)} indoor")
+    sc = Counter(s for _, s in summary)
+    print(f"\n{len(summary)} images classified -> {out}{note}: "
+          f"{sc.get('outdoor',0)} outdoor, {sc.get('indoor',0)} indoor")
+    rows = summary  # by-hour readout below reports on the just-classified batch
     print("\nby hour (validates against the daily schedule):")
     print(f"  {'hour':>4} {'outdoor':>8} {'indoor':>7}")
     for hr in sorted({h for h, _ in rows if h >= 0}):
@@ -1483,6 +1600,17 @@ def _build_thumbs(items, album, cache, size, workers):
                 f.unlink()
         marker.write_text(str(size))
 
+    # Prune thumbs whose photo is no longer indexed under its current key — e.g. a
+    # stem that became shared after a new import now uses a path-hash key, orphaning
+    # its old bare-stem thumb. The hash scheme already prevents a stale thumb being
+    # *served* for the wrong photo; this just keeps orphans from piling up on disk.
+    valid = {it["k"] for it in items}
+    orphans = [p for p in cache.glob("*.jpg") if p.stem not in valid]
+    if orphans:
+        print(f"Thumbnails: pruning {len(orphans)} orphaned thumb(s).")
+        for p in orphans:
+            p.unlink()
+
     todo = [it for it in items if not (cache / f"{it['k']}.jpg").exists()]
     if not todo:
         print(f"Thumbnails: {len(items)} cached, 0 to build.")
@@ -1800,6 +1928,11 @@ def main() -> int:
                             "daily schedule is rigid), green=foliage/sky colour, both=AND")
     p_scn.add_argument("--outdoor-hours", default="10-11",
                        help="outdoor hour window for time/both, e.g. 10-11 (default: 10-11)")
+    p_scn.add_argument("--subdir", default="",
+                       help="only classify images under album/<subdir>/ and MERGE into "
+                            "scene.csv, keeping other batches' rows. Use when an import's "
+                            "outdoor block differs from earlier ones (e.g. --subdir 20260618 "
+                            "--outdoor-hours 13-14).")
     p_scn.add_argument("--thresh", type=float, default=0.12,
                        help="green+sky fraction >= this is outdoor (default: 0.12)")
     p_scn.add_argument("--limit", type=int, default=0, help="only first N images (for testing)")

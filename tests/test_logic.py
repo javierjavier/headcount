@@ -333,6 +333,48 @@ def test_thumb_keys_stable_across_runs():
     assert faces.assign_thumb_keys(fns) == faces.assign_thumb_keys(list(reversed(fns)))
 
 
+# --- review: identity-stable label remap -----------------------------------
+
+def test_remap_labels_by_face_id_majority_and_purity():
+    # face_id keys are strings (load_cluster_map -> dict[str, int]); both maps must
+    # agree on key type or the join silently never matches.
+    # Old: cluster 7 = "ada" (faces 0,1,2), cluster 3 = "ben" (faces 3,4).
+    old_face_cluster = {"0": 7, "1": 7, "2": 7, "3": 3, "4": 3}
+    old_cluster_name = {7: "ada", 3: "ben"}
+    # New run renumbered ids: ada's faces -> cluster 1 (plus a stray ben face),
+    # ben's -> cluster 0. The integer ids deliberately don't match the old ones.
+    new_face_cluster = {"0": 1, "1": 1, "2": 1, "3": 1, "4": 0}
+    out = faces.remap_labels_by_face_id(old_face_cluster, old_cluster_name, new_face_cluster)
+    assert out[1][0] == "ada" and out[1][2] == 4        # majority name, 4 named voters
+    assert abs(out[1][1] - 0.75) < 1e-9                 # 3/4 ada -> 75% purity
+    assert out[0][0] == "ben" and out[0][1] == 1.0
+
+
+def test_remap_labels_ignores_unlabeled_and_noise():
+    # A new cluster made only of old-noise / old-unlabeled faces gets no entry
+    # (stays blank), and noise faces (cluster -1) never vote.
+    old_face_cluster = {"0": 5, "1": -1, "2": 9}
+    old_cluster_name = {5: "ada"}        # cluster 9 was unlabeled (junk)
+    new_face_cluster = {"0": 2, "1": 2, "2": 4, "3": -1}
+    out = faces.remap_labels_by_face_id(old_face_cluster, old_cluster_name, new_face_cluster)
+    assert out[2][0] == "ada"            # only face 0 is named -> ada
+    assert 4 not in out                  # cluster 4 = only old-unlabeled -> blank
+    assert -1 not in out                 # noise never gets a name
+
+
+# --- scene: per-subdir merge -----------------------------------------------
+
+def test_merge_scene_rows_new_wins_and_sorts():
+    existing = [["b.heic", "9", "", "", "", "indoor"],
+                ["a.heic", "10", "", "", "", "outdoor"]]
+    new = [["a.heic", "13", "", "", "", "indoor"],      # re-tagged: new wins
+           ["c/IMG.heic", "13", "", "", "", "outdoor"]]  # added
+    merged = faces.merge_scene_rows(existing, new)
+    assert [r[0] for r in merged] == ["a.heic", "b.heic", "c/IMG.heic"]  # sorted
+    assert merged[0] == ["a.heic", "13", "", "", "", "indoor"]           # new won
+    assert merged[1] == ["b.heic", "9", "", "", "", "indoor"]            # untouched
+
+
 # --- standalone runner (no pytest) -----------------------------------------
 
 def _run_standalone() -> int:

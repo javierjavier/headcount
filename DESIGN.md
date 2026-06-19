@@ -105,6 +105,16 @@ kids first). Write a skeleton `labels.csv` (`cluster_id, name`) for you to fill
 in. Minimal — folders of crops + a CSV you edit; no GUI required. Could later
 become a small local HTML page.
 
+Re-running after a new import is the common case, and HDBSCAN does **not** keep
+cluster ids stable across runs (the same integer can denote a different child once
+the face set changes), so carrying labels forward by cluster_id silently
+mislabels. Instead `cluster` snapshots the prior membership (`clusters.csv.bak`)
+and `review` re-attaches each name by **face_id majority vote**: face_id is stable
+across re-embeds, so for each new cluster we look at what its member faces were
+named before and take the majority, reporting the vote purity so any uncertain
+remap is visible. This is the identity-stable version of the carry-forward — see
+`remap_labels_by_face_id`.
+
 ### 4. `assign` — fast export (reuses `collect` copy logic)
 
 From `labels.csv` + `clusters.csv` + `faces.csv`, compute the set of named kids

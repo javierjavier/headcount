@@ -139,6 +139,16 @@ python faces.py scene --method time --outdoor-hours 10-11   # -> scene.csv
 python faces.py query --with ada --where outdoor
 ```
 
+`scene` rewrites the whole `scene.csv` with one outdoor-hours rule. If a later
+import's outdoor block differs from earlier batches (different day, different
+schedule), re-tagging everything would mis-tag the old batches. Use `--subdir` to
+classify just that import's folder and **merge** the result, leaving other
+batches' rows untouched:
+
+```bash
+python faces.py scene --subdir 20260618 --outdoor-hours 13-14   # only that batch
+```
+
 A foliage/sky colour method (`--method green`) also exists, but green classroom
 decor (a leafy rug, a green wall) makes it leak ~20%; time wins for this album.
 See `DESIGN.md` / commit history.
@@ -165,6 +175,16 @@ only lists images that yielded a face, so the manifest is what lets a re-run als
 skip images where *no* face was detected — otherwise those would be re-decoded
 every time. It's generated and gitignored; delete it (or use `embed --rescan`)
 only if you want a clean rebuild.
+
+Re-running `cluster` renumbers HDBSCAN's cluster ids (the same integer can mean a
+different child after the face set changes), which would break a label
+carry-forward done by id. So `cluster` backs up the prior `clusters.csv` to
+`clusters.csv.bak`, and `review` carries your existing names forward by **face_id
+majority vote** against that backup — robust to renumbering. It prints how many
+names it carried and flags any cluster labeled with <90% vote agreement so you
+can eyeball just those montages. (First run, with no backup, it falls back to the
+old by-id carry.) So after adding photos the labeling step is usually a quick
+confirm, not a redo — re-type a name only for a genuinely new child.
 
 The skip logic keys on the image's path **relative to `album/`** (e.g.
 `photos-3/IMG_4492.HEIC`), not its bare basename. This is why subfolders matter:
