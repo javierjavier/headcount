@@ -24,6 +24,9 @@ clusters*/
 by_child*/
 query*/
 validation_*.jpg
+# face-crop review sheets + their coordinate dumps (sweep/QA) — biometric
+suspect_*.jpg
+suspect_*.csv
 *.log
 # local `serve` thumbnail cache — derived face thumbnails
 .serve_cache/
