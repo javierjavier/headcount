@@ -24,6 +24,11 @@ pillow_heif.register_heif_opener()
 # Extensions we'll treat as images when scanning a folder.
 IMAGE_EXTS = {".heic", ".heif", ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
+# Video extensions the `serve` gallery surfaces (they're ignored by the face
+# pipeline — embed/cluster only read IMAGE_EXTS). iPhone clips are .mov/.mp4;
+# the rest are common containers a browser's <video> can usually play.
+VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
+
 # Archive extensions worth flagging: a common first-run mistake is dropping the
 # downloaded album archive into the folder without extracting it.
 ARCHIVE_EXTS = {".zip", ".tar", ".gz", ".tgz", ".7z", ".rar"}
@@ -118,6 +123,29 @@ def list_images(folder: str | Path) -> list[Path]:
             f"(Non-image files in the subfolder, e.g. .mp4 videos, are ignored.)"
         )
     return sorted(images)
+
+
+def list_videos(folder: str | Path) -> list[Path]:
+    """Return video files anywhere under *folder* (recursively), sorted.
+
+    The mirror of `list_images` for the `serve` gallery: same recursion and
+    dotfile/dot-dir skipping, keyed on VIDEO_EXTS. Deliberately *not* a hard
+    error on anything — videos are an additive view layer, never required — so a
+    missing or fileless folder just yields an empty list (the caller has already
+    validated the album for the image pipeline). Pair with `rel_key(p, folder)`
+    for the album-relative key, exactly like images.
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        return []
+    videos: list[Path] = []
+    for p in folder.rglob("*"):
+        rel = p.relative_to(folder)
+        if any(part.startswith(".") for part in rel.parts):
+            continue  # skip dotfiles / dot-dirs (.DS_Store, .serve_cache, ...)
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
+            videos.append(p)
+    return sorted(videos)
 
 
 def load_image_bgr(source) -> np.ndarray:

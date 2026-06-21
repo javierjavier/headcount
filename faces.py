@@ -60,6 +60,7 @@ from common import (
     build_face_app,
     empty_hint,
     list_images,
+    list_videos,
     load_image_bgr,
     load_image_rgb_pil,
     rel_key,
@@ -691,11 +692,11 @@ def cmd_review(args) -> int:
     carried = sum(1 for _, n, _ in report if n)
     if remap is not None:
         print(f"Carried {carried} name(s) forward by face_id vote (robust to re-cluster renumbering).")
-        low = [(cid, n, p) for cid, n, p in report if n and p is not None and p < 0.90]
+        low = [(cid, n, pur) for cid, n, pur in report if n and pur is not None and pur < 0.90]
         if low:
             print(f"  ! {len(low)} cluster(s) labeled with <90% vote agreement — eyeball the montage:")
-            for cid, n, p in low:
-                print(f"      cluster {cid}: {n} ({p:.0%})")
+            for cid, n, pur in low:
+                print(f"      cluster {cid}: {n} ({pur:.0%})")
         dropped = sorted(set(prior_names.values()) - {n for _, n, _ in report if n})
         if dropped:
             print(f"  ! prior name(s) not matched to any cluster this run: {', '.join(dropped)} "
@@ -1221,9 +1222,13 @@ SERVE_PAGE = """<!doctype html>
   .ctl { display:flex; align-items:center; gap:8px; color:var(--muted); }
   .ctl select { width:auto; }
   .grid { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-start; }
-  .grid .cell { width:var(--cell); height:var(--cell); flex:none; background:var(--panel); border-radius:8px; overflow:hidden; cursor:pointer; border:0; padding:0;
+  .grid .cell { position:relative; width:var(--cell); height:var(--cell); flex:none; background:var(--panel); border-radius:8px; overflow:hidden; cursor:pointer; border:0; padding:0;
     transition:width .12s ease, height .12s ease; content-visibility:auto; contain-intrinsic-size:var(--cell); }
   .grid img { width:100%; height:100%; object-fit:cover; display:block; }
+  /* play badge on video cells (CSS-only, so it scales with the size slider) */
+  .grid .cell.vid::after { content:"\\25B6"; position:absolute; left:6px; bottom:6px;
+    width:22px; height:22px; border-radius:50%; background:rgba(8,9,12,.62); color:#fff;
+    font-size:9px; display:flex; align-items:center; justify-content:center; padding-left:2px; pointer-events:none; }
   /* slim vertical date marker sitting inline between each day's photos */
   .dhead { flex:none; width:30px; height:var(--cell); transition:height .12s ease; display:flex; align-items:center; justify-content:center;
            writing-mode:vertical-rl; text-orientation:mixed; white-space:nowrap;
@@ -1237,6 +1242,7 @@ SERVE_PAGE = """<!doctype html>
   #lbimg { max-width:100%; max-height:100%; object-fit:contain; border-radius:6px;
            transition:filter .15s; cursor:zoom-in; }
   #lbimg.loading { filter:blur(8px); }
+  #lbvid { max-width:100%; max-height:100%; border-radius:6px; background:#000; }
   #lbcap { padding:6px 16px 14px; color:var(--muted); text-align:center; }
   #lbcap b { color:var(--ink); }
   #lbcap a { color:var(--accent); text-decoration:none; margin-left:10px; }
@@ -1272,6 +1278,12 @@ SERVE_PAGE = """<!doctype html>
       <option value="indoor">Indoor</option>
       <option value="outdoor">Outdoor</option>
     </select>
+    <h2>Media</h2>
+    <select id="media">
+      <option value="">Photos &amp; videos</option>
+      <option value="photo">Photos only</option>
+      <option value="video">Videos only</option>
+    </select>
     <h2>Preview size</h2>
     <input type="range" class="sizerange" id="csize" min="90" max="300" step="10">
   </aside>
@@ -1305,6 +1317,7 @@ SERVE_PAGE = """<!doctype html>
   <div id="lbstage">
     <button class="lbbtn" id="lbprev" title="Previous (←)">&#8249;</button>
     <img id="lbimg" alt="">
+    <video id="lbvid" controls playsinline preload="metadata" style="display:none"></video>
     <button class="lbbtn" id="lbnext" title="Next (→)">&#8250;</button>
   </div>
   <div id="lbcap"></div>
@@ -1312,7 +1325,7 @@ SERVE_PAGE = """<!doctype html>
 
 <script>
 const DATA = __MANIFEST__;
-const S = { names:new Set(), mode:"all", hmin:0, hmax:23, scene:"", search:"", sort:"new", cell:150 };
+const S = { names:new Set(), mode:"all", hmin:0, hmax:23, scene:"", media:"", search:"", sort:"new", cell:150 };
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
 // hour bounds present in the data (photos with a known hour)
@@ -1324,7 +1337,7 @@ S.hmin = HMIN; S.hmax = HMAX;
 const SKEY = "headcount.filters.v1";
 function saveState() {
   try { localStorage.setItem(SKEY, JSON.stringify({
-    names:[...S.names], mode:S.mode, hmin:S.hmin, hmax:S.hmax, scene:S.scene, sort:S.sort, cell:S.cell
+    names:[...S.names], mode:S.mode, hmin:S.hmin, hmax:S.hmax, scene:S.scene, media:S.media, sort:S.sort, cell:S.cell
   })); } catch (e) {}
 }
 function loadState() {
@@ -1337,6 +1350,7 @@ function loadState() {
   if (typeof v.hmax === "number") S.hmax = Math.min(Math.max(v.hmax, HMIN), HMAX);
   if (S.hmin > S.hmax) { S.hmin = HMIN; S.hmax = HMAX; }
   if (v.scene === "indoor" || v.scene === "outdoor") S.scene = v.scene;
+  if (v.media === "photo" || v.media === "video") S.media = v.media;
   if (v.sort === "old" || v.sort === "new") S.sort = v.sort;
   if (typeof v.cell === "number") S.cell = Math.min(Math.max(v.cell, 90), 300);
 }
@@ -1371,6 +1385,8 @@ function matches(it) {
   }
   if (it.h !== null && (it.h < S.hmin || it.h > S.hmax)) return false;   // unknown hour always passes
   if (S.scene && it.s !== S.scene) return false;
+  if (S.media === "photo" && it.v) return false;
+  if (S.media === "video" && !it.v) return false;
   return true;
 }
 
@@ -1379,8 +1395,9 @@ function matches(it) {
 // disk (decoded once) and the browser caches the response, so warming a key is
 // cheap after the first hit and openLB reuses whatever's already in flight. ---
 const warmed = new Set();
+const VIDKEYS = new Set(DATA.items.filter(i => i.v).map(i => i.k));   // videos have no /full preview
 function warm(k) {
-  if (!k || warmed.has(k)) return;
+  if (!k || warmed.has(k) || VIDKEYS.has(k)) return;
   warmed.add(k);
   new Image().src = "/full/" + encodeURIComponent(k);   // 2048px preview (no full=1)
 }
@@ -1420,10 +1437,10 @@ function render() {
     if (!y) return -1;
     return S.sort === "old" ? (x < y ? -1 : x > y ? 1 : 0) : (x < y ? 1 : x > y ? -1 : 0);
   });
-  $("count").textContent = current.length + " photo" + (current.length === 1 ? "" : "s");
+  $("count").textContent = current.length + " item" + (current.length === 1 ? "" : "s");
   $("export").disabled = current.length === 0;
   const grid = $("grid");
-  if (!current.length) { grid.innerHTML = '<div class="empty">No photos match these filters.</div>'; return; }
+  if (!current.length) { grid.innerHTML = '<div class="empty">Nothing matches these filters.</div>'; return; }
   if (warmIO) warmIO.disconnect();   // drop observations on the cells we're about to discard
   grid.innerHTML = "";
   const frag = document.createDocumentFragment();
@@ -1435,11 +1452,13 @@ function render() {
       const sameDay = current.filter(o => dayOf(o) === day).length;
       const h = document.createElement("div"); h.className = "dhead";
       h.textContent = prettyDayShort(day);
-      h.title = prettyDay(day) + " · " + sameDay + " photo" + (sameDay === 1 ? "" : "s");
+      h.title = prettyDay(day) + " · " + sameDay + " item" + (sameDay === 1 ? "" : "s");
       frag.appendChild(h);
     }
     const cell = document.createElement("button");
-    cell.className = "cell"; cell.title = it.n.join(", "); cell.onclick = () => openLB(i);
+    cell.className = it.v ? "cell vid" : "cell";
+    cell.title = it.n.join(", ") || (it.v ? "video" : "");
+    cell.onclick = () => openLB(i);
     cell.dataset.k = it.k;
     const img = document.createElement("img");
     img.loading = "lazy"; img.src = "/thumb/" + encodeURIComponent(it.k);
@@ -1474,28 +1493,45 @@ function buildNames() {
 // --- lightbox: show the (already-loaded) thumbnail instantly, swap in the
 // 2048px render when it arrives; clicking the image opens the original. ---
 let lbi = -1;
+function stopVid() {                                  // pause + detach so audio never plays on
+  const v = $("lbvid"); v.pause(); v.removeAttribute("src"); v.load(); v.style.display = "none";
+}
 function openLB(i) {
   lbi = i; const it = current[i];
   const img = $("lbimg");
-  img.classList.add("loading");
-  img.src = "/thumb/" + encodeURIComponent(it.k);     // instant placeholder
-  const orig = "/full/" + encodeURIComponent(it.k) + "?full=1";
-  img.title = "Open full resolution";
-  img.onclick = () => window.open(orig, "_blank", "noopener");
-  const full = new Image();
-  full.onload = () => { if (lbi === i) { img.src = full.src; img.classList.remove("loading"); } };
-  full.src = "/full/" + encodeURIComponent(it.k);
   const day = dayOf(it), time = prettyTime(it.dt);
-  $("lbcap").innerHTML = "<b>" + (it.n.join(", ") || "(no names)") + "</b> · " + prettyDay(day) +
-    (time ? " · " + time : "") +
-    ' <a href="' + orig + '" target="_blank" rel="noopener">full resolution &#8599;</a>';
   $("lbprev").style.visibility = i > 0 ? "visible" : "hidden";
   $("lbnext").style.visibility = i < current.length - 1 ? "visible" : "hidden";
-  if (i > 0) warm(current[i - 1].k);                       // warm neighbors so arrow-nav is instant
-  if (i < current.length - 1) warm(current[i + 1].k);
+  if (it.v) {
+    // Video: stream from /video/ (Range-served so seeking works). Some codecs
+    // (e.g. HEVC .mov outside Safari) won't decode; the download link is the
+    // fallback. No /full preview warming for videos.
+    img.style.display = "none"; img.classList.remove("loading");
+    const url = "/video/" + encodeURIComponent(it.k);
+    const vid = $("lbvid"); vid.style.display = ""; vid.src = url; vid.play().catch(() => {});
+    $("lbcap").innerHTML = "<b>" + (it.n.join(", ") || "Video") + "</b> · " + prettyDay(day) +
+      (time ? " · " + time : "") +
+      ' <a href="' + url + '" target="_blank" rel="noopener">download &#8599;</a>';
+  } else {
+    stopVid();
+    img.style.display = "";
+    img.classList.add("loading");
+    img.src = "/thumb/" + encodeURIComponent(it.k);     // instant placeholder
+    const orig = "/full/" + encodeURIComponent(it.k) + "?full=1";
+    img.title = "Open full resolution";
+    img.onclick = () => window.open(orig, "_blank", "noopener");
+    const full = new Image();
+    full.onload = () => { if (lbi === i) { img.src = full.src; img.classList.remove("loading"); } };
+    full.src = "/full/" + encodeURIComponent(it.k);
+    $("lbcap").innerHTML = "<b>" + (it.n.join(", ") || "(no names)") + "</b> · " + prettyDay(day) +
+      (time ? " · " + time : "") +
+      ' <a href="' + orig + '" target="_blank" rel="noopener">full resolution &#8599;</a>';
+    if (i > 0) warm(current[i - 1].k);                     // warm neighbors so arrow-nav is instant
+    if (i < current.length - 1) warm(current[i + 1].k);
+  }
   $("lb").style.display = "flex";
 }
-function closeLB() { $("lb").style.display = "none"; lbi = -1; }
+function closeLB() { stopVid(); $("lb").style.display = "none"; lbi = -1; }
 function navLB(d) { const n = lbi + d; if (n >= 0 && n < current.length) openLB(n); }
 
 $("lbclose").onclick = closeLB;
@@ -1529,6 +1565,8 @@ hmin.oninput = e => { S.hmin = Math.min(+e.target.value, S.hmax); e.target.value
 hmax.oninput = e => { S.hmax = Math.max(+e.target.value, S.hmin); e.target.value = S.hmax; hourLabel(); updFill(); render(); };
 $("scene").value = S.scene;
 $("scene").onchange = e => { S.scene = e.target.value; render(); };
+$("media").value = S.media;
+$("media").onchange = e => { S.media = e.target.value; render(); };
 // thumbnail size is pure CSS (a custom property) — no re-render needed
 const csize = $("csize");
 csize.value = S.cell;
@@ -1560,6 +1598,126 @@ buildNames(); hourLabel(); updFill(); render();
 </script>
 </body>
 </html>"""
+
+
+# MIME types for the bytes `serve` streams from /video/. Anything else falls
+# back to octet-stream (the browser sniffs / offers a download).
+VIDEO_CTYPES = {
+    ".mp4": "video/mp4", ".m4v": "video/x-m4v", ".mov": "video/quicktime",
+    ".webm": "video/webm", ".avi": "video/x-msvideo", ".mkv": "video/x-matroska",
+}
+
+
+def parse_byte_range(header: str | None, file_size: int):
+    """Parse one HTTP Range header against *file_size*. Pure, so it's unit-tested.
+
+    Browsers won't reliably play a <video> served as a plain 200 — they expect
+    `Accept-Ranges: bytes` and 206 partial responses so seeking only fetches the
+    needed slice. Returns:
+      None         -> no/ill-formed range; caller serves the whole file (200).
+      False        -> a syntactically valid but unsatisfiable range (-> 416).
+      (start, end) -> inclusive byte bounds clamped to the file (-> 206).
+    Only the first range of a multi-range request is honored (enough for media
+    scrubbing; multipart/byteranges isn't worth the complexity here).
+    """
+    if not header or not header.startswith("bytes="):
+        return None
+    spec = header[len("bytes="):].split(",")[0].strip()
+    if "-" not in spec:
+        return None
+    a, b = (s.strip() for s in spec.split("-", 1))
+    try:
+        if a == "":                       # suffix form "bytes=-N" -> last N bytes
+            if b == "":
+                return None
+            length = int(b)
+            if length <= 0:
+                return False
+            start, end = max(0, file_size - length), file_size - 1
+        else:
+            start = int(a)
+            end = int(b) if b else file_size - 1
+    except ValueError:
+        return None
+    end = min(end, file_size - 1)
+    if start > end or start >= file_size:
+        return False
+    return (start, end)
+
+
+def _video_dt(path: Path) -> str:
+    """Capture datetime 'YYYY:MM:DD HH:MM:SS' for a video, or '' if unknown.
+
+    Mirrors `_exif_dt`'s format so videos sort and date-group alongside photos.
+    Prefers the container's `creation_time` tag (ffprobe), which iPhone records in
+    UTC — converted to local time so it lines up with the photos' local EXIF
+    clock. Falls back to the file's mtime if there's no tag (or no ffprobe).
+    """
+    import json
+    import subprocess
+    from datetime import datetime, timezone
+
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_entries", "format_tags=creation_time", str(path)],
+            capture_output=True, text=True, timeout=20,
+        ).stdout
+        ct = (json.loads(out or "{}").get("format", {})
+              .get("tags", {}).get("creation_time", ""))
+        if ct:
+            dt = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone().strftime("%Y:%m:%d %H:%M:%S")
+    except Exception:  # noqa: BLE001 - ffprobe missing / odd container -> mtime
+        pass
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y:%m:%d %H:%M:%S")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _video_poster(path: Path):
+    """A representative frame of *path* as an upright RGB PIL image, or None.
+
+    Used as the grid thumbnail for a video. Seeks ~1s in (skips black intro
+    frames) with a fast input seek; retries at 0s for clips shorter than that.
+    Returns None if ffmpeg is missing or can't decode — the caller then draws a
+    generic placeholder, so a video is never dropped from the gallery.
+    """
+    import io
+    import subprocess
+
+    from PIL import Image
+
+    for ss in ("1", "0"):
+        try:
+            out = subprocess.run(
+                ["ffmpeg", "-nostdin", "-v", "error", "-ss", ss, "-i", str(path),
+                 "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+                capture_output=True, timeout=30,
+            ).stdout
+            if out:
+                return Image.open(io.BytesIO(out)).convert("RGB")
+        except Exception:  # noqa: BLE001 - no ffmpeg / undecodable -> placeholder
+            return None
+    return None
+
+
+def _placeholder_thumb(size: int):
+    """A neutral film-strip tile for a video with no extractable poster frame."""
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGB", (size, size), (38, 41, 48))
+    d = ImageDraw.Draw(im)
+    s = max(6, size // 12)                       # sprocket-hole strip down each edge
+    for y in range(s, size - s, 2 * s):
+        d.rectangle([s // 2, y, s, y + s], fill=(28, 30, 36))
+        d.rectangle([size - s, y, size - s // 2, y + s], fill=(28, 30, 36))
+    c, r = size // 2, size // 7                   # centered play triangle
+    d.polygon([(c - r, c - r), (c - r, c + r), (c + r, c)], fill=(154, 163, 178))
+    return im
 
 
 def assign_thumb_keys(filenames: list[str]) -> dict[str, str]:
@@ -1636,7 +1794,10 @@ def _build_thumbs(items, album, cache, size, workers):
         src = (album / it["f"]).resolve()
         if not src.exists():
             return
-        img = load_image_rgb_pil(src)   # upright RGB; EXIF dropped on save below
+        if it.get("v"):                 # video: poster frame, or a placeholder tile
+            img = _video_poster(src) or _placeholder_thumb(size)
+        else:
+            img = load_image_rgb_pil(src)   # upright RGB; EXIF dropped on save below
         img.thumbnail((size, size))
         img.save(cache / f"{it['k']}.jpg", "JPEG", quality=80)
 
@@ -1679,16 +1840,25 @@ def cmd_serve(args) -> int:
             scenes[r["filename"]] = r.get("scene") or ""
 
     album = Path(args.album)
-    # `k` is a filesystem-safe key used for thumb/full URLs and as the cache
+    # `k` is a filesystem-safe key used for thumb/full/video URLs and as the cache
     # filename; `f` is the real album-relative path used to read original bytes.
     # See assign_thumb_keys for why a bare stem isn't always safe with subfolders.
     visible = [(fn, names) for fn, names in sorted(people.items())
                if (album / fn).exists()]
-    keys = assign_thumb_keys([fn for fn, _ in visible])
+    # Videos are an additive view layer: the face pipeline ignores them, so they
+    # carry no names and are discovered straight from album/ (not image_people).
+    video_fns = [] if args.no_videos else [rel_key(p, album) for p in list_videos(album)]
+    # Key photos and videos together so a video and photo sharing a stem
+    # (IMG_1.MP4 vs IMG_1.HEIC) still get distinct, collision-free cache keys.
+    keys = assign_thumb_keys([fn for fn, _ in visible] + video_fns)
     items, by_key = [], {}
     for fn, names in visible:
         it = {"k": keys[fn], "f": fn, "n": names,
-              "h": hours.get(fn), "s": scenes.get(fn, "")}
+              "h": hours.get(fn), "s": scenes.get(fn, ""), "v": False}
+        items.append(it)
+        by_key[keys[fn]] = it
+    for fn in video_fns:
+        it = {"k": keys[fn], "f": fn, "n": [], "h": None, "s": "", "v": True}
         items.append(it)
         by_key[keys[fn]] = it
     if not items:
@@ -1716,17 +1886,30 @@ def cmd_serve(args) -> int:
             dates = {}
     missing = [it for it in items if it["f"] not in dates]
     if missing:
-        print(f"Reading capture dates for {len(missing)} photo(s) ...")
+        print(f"Reading capture dates for {len(missing)} item(s) ...")
+
+        def _read_dt(it):
+            p = album / it["f"]
+            return it["f"], (_video_dt(p) if it["v"] else _exif_dt(p))
+
         with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
-            for fn, dt in ex.map(lambda it: (it["f"], _exif_dt(album / it["f"])), missing):
+            for fn, dt in ex.map(_read_dt, missing):
                 dates[fn] = dt
         dates_path.write_text(json.dumps(dates))
     for it in items:
         it["dt"] = dates.get(it["f"], "")
+        # Videos have no scene.csv hour; derive it from the capture time so the
+        # time-of-day filter applies to them just like photos.
+        if it["v"] and it["dt"]:
+            try:
+                it["h"] = int(it["dt"].split(" ")[1].split(":")[0])
+            except (IndexError, ValueError):
+                pass
 
     all_names = sorted({n for it in items for n in it["n"]})
     manifest = {"names": all_names,
-                "items": [{"k": it["k"], "n": it["n"], "h": it["h"], "s": it["s"], "dt": it["dt"]}
+                "items": [{"k": it["k"], "n": it["n"], "h": it["h"], "s": it["s"],
+                           "dt": it["dt"], "v": 1 if it["v"] else 0}
                           for it in items]}
     page = SERVE_PAGE.replace("__MANIFEST__", json.dumps(manifest))
 
@@ -1742,6 +1925,45 @@ def cmd_serve(args) -> int:
                 self.send_header(k, v)
             self.end_headers()
             self.wfile.write(body)
+
+        def _send_file_range(self, src: Path, ctype: str):
+            """Stream *src* with HTTP Range support so <video> can seek/scrub.
+
+            Browsers play media by requesting byte ranges and expect 206 partial
+            responses; without `Accept-Ranges`/206 many won't play at all. Reads
+            in chunks so a multi-GB clip never lands in RAM, and swallows the
+            client-aborted-connection errors that seeking routinely triggers.
+            """
+            size = src.stat().st_size
+            rng = parse_byte_range(self.headers.get("Range"), size)
+            if rng is False:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            if rng is None:
+                start, end, code = 0, size - 1, 200
+            else:
+                start, end, code = rng[0], rng[1], 206
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Accept-Ranges", "bytes")
+            if code == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Content-Length", str(end - start + 1))
+            self.end_headers()
+            remaining = end - start + 1
+            try:
+                with src.open("rb") as f:
+                    f.seek(start)
+                    while remaining > 0:
+                        chunk = f.read(min(65536, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # client seeked away / closed the tab mid-stream — normal
 
         def do_GET(self):
             from urllib.parse import unquote, urlparse
@@ -1762,7 +1984,7 @@ def cmd_serve(args) -> int:
                     self._send(404, b"not found", "text/plain")
             elif path.startswith("/full/"):
                 it = by_key.get(path[len("/full/"):])
-                src = (album / it["f"]) if it else None
+                src = (album / it["f"]) if (it and not it["v"]) else None   # videos use /video, not /full
                 if not (src and src.exists()):
                     self._send(404, b"not found", "text/plain")
                 elif "full=1" in query:                # full res: rare path, decode each time
@@ -1781,6 +2003,14 @@ def cmd_serve(args) -> int:
                         os.replace(tmp, pf)
                     self._send(200, pf.read_bytes(), "image/jpeg",
                                {"Cache-Control": "max-age=3600"})
+            elif path.startswith("/video/"):
+                it = by_key.get(path[len("/video/"):])
+                src = (album / it["f"]) if (it and it["v"]) else None
+                if not (src and src.exists()):
+                    self._send(404, b"not found", "text/plain")
+                else:
+                    ctype = VIDEO_CTYPES.get(src.suffix.lower(), "application/octet-stream")
+                    self._send_file_range(src, ctype)
             else:
                 self._send(404, b"not found", "text/plain")
 
@@ -1808,7 +2038,9 @@ def cmd_serve(args) -> int:
                         src = album / it["f"]
                         if not src.exists():
                             continue
-                        if fmt == "jpeg":
+                        if it["v"]:                  # videos export as-is (no re-encode)
+                            z.write(src, it["f"])
+                        elif fmt == "jpeg":
                             img = load_image_rgb_pil(src)
                             img.thumbnail((2048, 2048))
                             buf = io.BytesIO()
@@ -1834,7 +2066,9 @@ def cmd_serve(args) -> int:
 
     httpd = Server((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
-    print(f"\n  headcount browsing {len(items)} photos, {len(all_names)} names")
+    n_vid = sum(1 for it in items if it["v"])
+    summary = f"{len(items) - n_vid} photos" + (f", {n_vid} videos" if n_vid else "")
+    print(f"\n  headcount browsing {summary}, {len(all_names)} names")
     print(f"  serving at {url}  (Ctrl-C to stop)\n")
     if not args.no_open:
         webbrowser.open(url)
@@ -1963,6 +2197,8 @@ def main() -> int:
     p_srv.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1 — localhost only)")
     p_srv.add_argument("--port", type=int, default=8765, help="port (default: 8765)")
     p_srv.add_argument("--no-open", action="store_true", help="don't auto-open a browser tab")
+    p_srv.add_argument("--no-videos", action="store_true",
+                       help="don't surface album videos in the gallery (photos only)")
     p_srv.set_defaults(func=cmd_serve)
 
     args = ap.parse_args()

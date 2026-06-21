@@ -333,6 +333,58 @@ def test_thumb_keys_stable_across_runs():
     assert faces.assign_thumb_keys(fns) == faces.assign_thumb_keys(list(reversed(fns)))
 
 
+# --- serve: HTTP byte-range parsing (video streaming) ----------------------
+
+def test_parse_byte_range_none_when_absent_or_malformed():
+    # No header, non-bytes unit, or no dash -> serve the whole file (200).
+    assert faces.parse_byte_range(None, 1000) is None
+    assert faces.parse_byte_range("", 1000) is None
+    assert faces.parse_byte_range("items=0-10", 1000) is None
+    assert faces.parse_byte_range("bytes=abc", 1000) is None
+    assert faces.parse_byte_range("bytes=foo-bar", 1000) is None
+
+
+def test_parse_byte_range_explicit_and_open_ended():
+    assert faces.parse_byte_range("bytes=0-499", 1000) == (0, 499)
+    assert faces.parse_byte_range("bytes=500-", 1000) == (500, 999)   # to EOF
+    assert faces.parse_byte_range("bytes=0-", 1000) == (0, 999)       # whole file as 206
+
+
+def test_parse_byte_range_suffix_and_clamp():
+    assert faces.parse_byte_range("bytes=-200", 1000) == (800, 999)   # last 200 bytes
+    assert faces.parse_byte_range("bytes=-5000", 1000) == (0, 999)    # suffix bigger than file
+    assert faces.parse_byte_range("bytes=900-9999", 1000) == (900, 999)  # end clamped to file
+    # Only the first range of a multi-range request is honored.
+    assert faces.parse_byte_range("bytes=0-9,20-29", 1000) == (0, 9)
+
+
+def test_parse_byte_range_unsatisfiable_is_false():
+    # Start past EOF, or a non-positive suffix -> 416 (distinct from None).
+    assert faces.parse_byte_range("bytes=1000-1001", 1000) is False
+    assert faces.parse_byte_range("bytes=5000-", 1000) is False
+    assert faces.parse_byte_range("bytes=-0", 1000) is False
+
+
+# --- list_videos -----------------------------------------------------------
+
+def test_list_videos_finds_sorts_and_skips_images(tmp_path):
+    for n in ["b.MP4", "clip.mov", "photo.heic", "note.txt", "a.mp4"]:
+        (tmp_path / n).write_bytes(b"")
+    sub = tmp_path / "2026-trip"
+    sub.mkdir()
+    (sub / "deep.mkv").write_bytes(b"")
+    cache = tmp_path / ".serve_cache"
+    cache.mkdir()
+    (cache / "x.mp4").write_bytes(b"")  # dot-dir contents must not leak in
+    got = sorted(common.rel_key(p, tmp_path) for p in common.list_videos(tmp_path))
+    assert got == ["2026-trip/deep.mkv", "a.mp4", "b.MP4", "clip.mov"]
+
+
+def test_list_videos_empty_for_missing_folder(tmp_path):
+    # Additive view layer: never a hard error, just nothing.
+    assert common.list_videos(tmp_path / "nope") == []
+
+
 # --- review: identity-stable label remap -----------------------------------
 
 def test_remap_labels_by_face_id_majority_and_purity():

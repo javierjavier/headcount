@@ -186,6 +186,35 @@ marker and clears + rebuilds when `--thumb` changes. Without this the per-key
 `exists()` skip would silently keep serving whatever size was built first — a
 smaller value later looks fine, a larger one stays blurry, with no signal why.
 
+### Videos: a view-only layer over `serve`
+
+`serve` also lists videos found in `album/` (`common.VIDEO_EXTS`). This is
+deliberately a **presentation-only** addition — the face pipeline is untouched:
+`embed`/`cluster`/`assign`/`query` still read images only, and videos carry no
+names. They're discovered straight from disk (not from `image_people.csv`), keyed
+through the same `assign_thumb_keys` collision scheme as photos (a video and photo
+can share a stem), and merged into the same grid/lightbox/export/filter machinery.
+
+Three things needed handling that photos didn't:
+
+- **Thumbnails.** No Pillow path decodes a video, so a poster frame is pulled with
+  `ffmpeg` (seek ~1s in to skip black intros). ffmpeg is treated as an *optional
+  system tool*, not a new pip dependency — missing it degrades to a film-strip
+  placeholder tile rather than dropping the video, keeping the pure-pip install
+  story intact. Posters cache in `.serve_cache/` next to photo thumbs, so the
+  existing size-aware sweep and orphan-prune cover them for free.
+- **Capture time.** Photos read EXIF; videos have none. `_video_dt` reads the
+  container `creation_time` via `ffprobe` and converts it from UTC (how iPhone
+  stores it) to local so videos date-group consistently with the photos' local
+  EXIF clock, falling back to file mtime. The hour is derived from that for the
+  time-of-day filter.
+- **Streaming.** A `<video>` element won't play off a plain 200 — browsers expect
+  `Accept-Ranges`/206 partial responses so a seek fetches only the needed slice.
+  The handler grows a Range-aware file streamer; the header parsing is factored
+  into the pure, unit-tested `parse_byte_range` (full / suffix / open-ended /
+  unsatisfiable→416). Codec support is the browser's: H.264 `.mp4` is universal,
+  HEVC `.mov` is Safari-only — so the lightbox always offers a download link.
+
 ## Data artifacts
 
 | File | Phase | Contents |
@@ -291,3 +320,55 @@ clusters, so anchors are insurance against a re-embed and a reusable asset for a
 future album — not load-bearing now. The narrow, cheap slice is the cross-check in
 (2): computable inside `review` from data already in hand (`faces.npy` +
 `clusters.csv.bak` + prior labels), needing no new artifact or workflow step.
+
+## Deferred: detecting faces *inside* videos
+
+The `serve` video support above is view-only. The natural follow-on — "who is in
+each video?", so a clip flows through `cluster`/`assign`/`query` like a photo —
+was scoped and **deliberately deferred**. It's a real pipeline change, not a tweak,
+and the design is recorded here so it can be picked up cleanly.
+
+**Sketch.** Sample frames (≈1 fps is plenty for "is this kid present"), run the
+existing `buffalo_l` detector+recognizer on each sampled frame, and fold the
+results into the same `faces.*` tables the photo path already uses. The embedding,
+clustering, labeling, and query layers are all identity-based and would work
+unchanged — the work is entirely in *getting frames in* and *not drowning the
+clustering in near-duplicates*.
+
+**The four problems that make it more than a loop:**
+
+1. **Identity of a "face in a video."** `faces.csv`'s `filename` column is assumed
+   openable as an image by every downstream stage (`review` crops it, `assign`
+   groups by it, `serve` reads its bytes). A video face needs a frame-qualified key
+   — e.g. `trip/clip.mov#t=12.0` — and every consumer that does `album / filename`
+   must learn to split off the `#t=` and extract that frame instead of `Image.open`.
+   That ripples through `review`'s crop step, `assign`'s per-image grouping (all
+   frames of one clip should roll up to the *clip*, not 90 separate "photos"), and
+   `serve`'s thumbnailer.
+
+2. **Per-(video, identity) dedup — the load-bearing one.** A child standing in
+   frame for 10s at 1 fps yields ~10 near-identical embeddings. Left raw, a few
+   long clips would dominate `cluster` (HDBSCAN density is sensitive to exactly
+   this) and wildly inflate per-child photo counts. So within each video, faces
+   must be collapsed by identity before they enter `faces.npy` — e.g. online
+   agglomeration at the calibrated 0.35 threshold, keeping one medoid embedding per
+   (video, identity) track plus a representative frame timestamp for `review`.
+
+3. **Cost, and keeping `embed` resumable.** 704 clips × N frames × detection is the
+   same order of magnitude as the 40-min photo embed. It must reuse the
+   `faces.done` manifest + crash-safe `.emb`/`.csv` journal so it's resumable per
+   clip, and it should be opt-in (`embed --videos`) so the photo-only run stays the
+   fast default. Frame decode would go through `ffmpeg`/PyAV rather than Pillow.
+
+4. **Recall vs. noise tradeoff.** Motion blur and odd angles make video faces
+   weaker on average than posed photo faces; the existing `cluster` pre-filter
+   (`--min-size`/`--min-det`) is the right lever, but may want separate thresholds
+   for video-sourced faces.
+
+**Why deferred, not dropped.** The view-only layer delivers most of the day-to-day
+value (you can *find and watch* the clips now) for a fraction of the cost and zero
+risk to the calibrated photo pipeline. The face-in-video work is a multi-stage
+change touching the one expensive, carefully-journaled stage (`embed`) plus every
+downstream consumer's filename assumption — worth doing behind an opt-in flag when
+"query videos by who's in them" becomes a real need, not before. Problem (2) is the
+one to prototype first: if per-clip dedup is clean, the rest is plumbing.

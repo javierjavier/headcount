@@ -90,8 +90,11 @@ python faces.py query --only ada,ben          # exactly those two
 #    (originals, or re-encoded 2048px JPEGs). Nothing leaves the machine; it
 #    binds 127.0.0.1 only. First run builds a thumbnail cache (.serve_cache/),
 #    which is the slow part (re-decodes each HEIC); later runs reuse it.
+#    Videos in album/ also appear in the grid (play inline in the lightbox);
+#    filter to/from them with the Media dropdown, or hide them with --no-videos.
 python faces.py serve                          # -> http://127.0.0.1:8765
 python faces.py serve --thumb 1024             # sharper previews (see note)
+python faces.py serve --no-videos              # photos only
 ```
 
 Previews come from `.serve_cache/` thumbnails built at `--thumb` long-edge
@@ -100,6 +103,30 @@ screens want ~2× the CSS pixels, so a too-small thumb upscales and looks blurry
 raise `--thumb` for crisper previews at the cost of build time and disk; lower it
 to save both. Changing the size rebuilds the cache automatically (it records the
 build size and clears stale thumbs); no manual `rm -rf .serve_cache` needed.
+
+#### Videos in the gallery
+
+`serve` also surfaces any videos in `album/` (`.mp4`, `.mov`, `.m4v`, `.webm`,
+`.avi`, `.mkv`), discovered straight from disk — they carry no face data (the
+face pipeline still ignores them entirely; `embed`/`cluster`/`assign`/`query`
+only ever touch images). In the grid each video gets a poster-frame thumbnail
+with a ▶ badge and plays inline in the lightbox; the **Media** dropdown filters
+to photos-only or videos-only. They're included in date sorting/grouping (by
+container `creation_time`, converted from UTC to local, falling back to file
+mtime) and the hour filter, and in zip export (always as the original file, never
+re-encoded). Use `--no-videos` to leave them out.
+
+Two notes:
+
+- **ffmpeg** (`ffmpeg`/`ffprobe` on `PATH`) is used to extract poster frames and
+  read capture times. It's an optional *system* tool, not a pip dependency — if
+  it's missing, videos still appear with a generic film-strip placeholder tile
+  and mtime-based dates. Install via e.g. `brew install ffmpeg`.
+- **Codec/playback** depends on the browser. `.mp4`/H.264 plays everywhere; HEVC
+  (common in iPhone `.mov`) plays in Safari but often not Chrome. When a browser
+  can't decode a clip, the lightbox shows native controls plus a **download**
+  link so the original is always reachable. Streaming is HTTP Range-served, so
+  seeking only fetches the needed bytes.
 
 ### Calibration (`enroll.py`) — optional, for a new album
 
@@ -199,8 +226,9 @@ any clash with a `_1`/`_2` suffix.
 
 If you leave a downloaded `.zip` (or other archive) sitting in `album/`, the
 tools stop with an error telling you to unzip it into a subfolder and remove the
-archive — rather than silently skipping every photo packed inside it. Videos and
-other non-image files in a subfolder are simply ignored.
+archive — rather than silently skipping every photo packed inside it. The face
+pipeline ignores videos and other non-image files; videos do, however, show up in
+the `serve` gallery (see *Videos in the gallery* above).
 
 ## Files
 
