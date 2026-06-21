@@ -85,6 +85,15 @@ python faces.py query --with ada,ben --jpeg   # browsable: reliable thumbnails
 python faces.py query --with ada --without ben
 python faces.py query --only ada,ben          # exactly those two
 
+# 6b. video — (optional) name the faces INSIDE album videos, using the labels you
+#    already filled in. Samples frames (default 1 fps), matches each face to your
+#    labeled clusters at the calibrated 0.35 threshold, and writes
+#    video_people.csv (clip -> names). Resumable like embed; needs ffmpeg. The
+#    photo pipeline is untouched — this only reads faces/clusters/labels. Slow-ish
+#    (a mini-embed: ~detector inference per sampled frame), so it's opt-in.
+python faces.py video                          # -> video_people.csv
+python faces.py video --fps 2 --limit 20       # denser sampling; first 20 clips
+
 # 7. serve — browse the whole album in a localhost-only web gallery instead of
 #    Finder: name + time-of-day filters, a preview-size slider, and zip export
 #    (originals, or re-encoded 2048px JPEGs). Nothing leaves the machine; it
@@ -115,6 +124,11 @@ to photos-only or videos-only. They're included in date sorting/grouping (by
 container `creation_time`, converted from UTC to local, falling back to file
 mtime) and the hour filter, and in zip export (always as the original file, never
 re-encoded). Use `--no-videos` to leave them out.
+
+If you've run `faces.py video` (see step 6b), `serve` also overlays each clip's
+detected names from `video_people.csv` — so videos become name-filterable and
+show names in the grid tooltip and lightbox caption, just like photos. Without
+that pass, videos simply show with no names.
 
 Two notes:
 
@@ -234,7 +248,7 @@ the `serve` gallery (see *Videos in the gallery* above).
 
 | File                      | Purpose                                            |
 | ------------------------- | -------------------------------------------------- |
-| `faces.py`                | The tool: `embed`/`cluster`/`review`/`assign`/`query`/`scene` |
+| `faces.py`                | The tool: `embed`/`cluster`/`review`/`assign`/`query`/`scene`/`video`/`serve` |
 | `enroll.py`               | Cold-start calibration: build `reference_embeddings.npy` from `reference/` |
 | `common.py`               | Shared HEIC/EXIF loading, model setup, small utilities |
 | `requirements.txt`        | Dependencies                                       |
@@ -245,4 +259,5 @@ the `serve` gallery (see *Videos in the gallery* above).
 | `clusters.csv`            | face → cluster id (generated)                      |
 | `labels.csv`              | cluster → name (you fill in during `review`)       |
 | `image_people.csv`        | filename → people present (generated)              |
+| `video_people.csv`        | video → people present, from `video` (generated)   |
 | `scene.csv`               | filename → indoor/outdoor (generated)              |

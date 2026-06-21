@@ -385,6 +385,64 @@ def test_list_videos_empty_for_missing_folder(tmp_path):
     assert common.list_videos(tmp_path / "nope") == []
 
 
+# --- video: centroid matching (shared by assign --recover and `video`) ------
+
+def _unit(v):
+    v = np.asarray(v, dtype=np.float32)
+    return v / np.linalg.norm(v)
+
+
+def test_match_to_centroids_accepts_clear_winner():
+    cents = np.array([[1, 0], [0, 1]], dtype=np.float32)
+    embs = np.array([[1, 0], [0, 1]], dtype=np.float32)   # exactly on each centroid
+    assert faces.match_to_centroids(embs, cents, 0.35, 0.05).tolist() == [0, 1]
+
+
+def test_match_to_centroids_threshold_rejects_low_sim():
+    cents = np.array([[1, 0], [0, 1]], dtype=np.float32)
+    e = _unit([1, 1])[None, :]                            # sim 0.707 to each
+    assert faces.match_to_centroids(e, cents, 0.8, 0.0).tolist() == [-1]
+
+
+def test_match_to_centroids_margin_rejects_ambiguous():
+    # Clears the threshold but is equidistant from both names -> margin 0 < 0.05.
+    cents = np.array([[1, 0], [0, 1]], dtype=np.float32)
+    e = _unit([1, 1])[None, :]
+    assert faces.match_to_centroids(e, cents, 0.5, 0.05).tolist() == [-1]
+
+
+def test_match_to_centroids_single_centroid_margin_vacuous():
+    # One centroid -> no runner-up, so only the threshold gates the match.
+    cents = np.array([[1, 0]], dtype=np.float32)
+    assert faces.match_to_centroids(np.array([[1, 0]], dtype=np.float32), cents, 0.35, 0.9).tolist() == [0]
+    assert faces.match_to_centroids(np.array([[0, 1]], dtype=np.float32), cents, 0.35, 0.0).tolist() == [-1]
+
+
+def test_match_to_centroids_empty_inputs():
+    cents = np.array([[1, 0]], dtype=np.float32)
+    assert faces.match_to_centroids(np.zeros((0, 2), dtype=np.float32), cents, 0.35, 0.05).tolist() == []
+    assert faces.match_to_centroids(np.array([[1, 0]], dtype=np.float32),
+                                    np.zeros((0, 2), dtype=np.float32), 0.35, 0.05).tolist() == [-1]
+
+
+def test_build_name_centroids_merges_clusters_sharing_a_name():
+    # Clusters 1 and 2 are both "ada" (a kid split across clusters) -> one merged
+    # centroid; cluster 3 is "ben"; the noise face (-1) is excluded.
+    rows = [{"face_id": str(i)} for i in range(4)]
+    clusters = {"0": 1, "1": 2, "2": 3, "3": -1}
+    labels = {1: "ada", 2: "ada", 3: "ben"}
+    mat = np.array([[1, 0], [1, 0], [0, 1], [5, 5]], dtype=np.float32)
+    names, cents = faces.build_name_centroids(rows, clusters, labels, mat)
+    assert names == ["ada", "ben"]
+    assert np.allclose(cents[0], [1, 0]) and np.allclose(cents[1], [0, 1])
+
+
+def test_build_name_centroids_empty_when_nothing_labeled():
+    rows = [{"face_id": "0"}]
+    names, cents = faces.build_name_centroids(rows, {"0": -1}, {}, np.zeros((1, 512), dtype=np.float32))
+    assert names == [] and cents.shape == (0, 512)
+
+
 # --- review: identity-stable label remap -----------------------------------
 
 def test_remap_labels_by_face_id_majority_and_purity():

@@ -191,7 +191,8 @@ smaller value later looks fine, a larger one stays blurry, with no signal why.
 `serve` also lists videos found in `album/` (`common.VIDEO_EXTS`). This is
 deliberately a **presentation-only** addition — the face pipeline is untouched:
 `embed`/`cluster`/`assign`/`query` still read images only, and videos carry no
-names. They're discovered straight from disk (not from `image_people.csv`), keyed
+names (until the optional `video` command names them — see below). They're
+discovered straight from disk (not from `image_people.csv`), keyed
 through the same `assign_thumb_keys` collision scheme as photos (a video and photo
 can share a stem), and merged into the same grid/lightbox/export/filter machinery.
 
@@ -226,6 +227,7 @@ Three things needed handling that photos didn't:
 | `clusters.csv` | cluster | `face_id → cluster_id` |
 | `labels.csv` | review | `cluster_id → name` (human-edited) |
 | `image_people.csv` | assign | `filename → set of names` |
+| `video_people.csv` | video | `video → set of names` (+ `n_named`, peak frame per name); `video_people.done` is its resume manifest |
 | `by_child/<name>/`, `query/<expr>/` | assign/query | output copies |
 
 All of these contain biometric data and stay gitignored (see below).
@@ -321,54 +323,59 @@ future album — not load-bearing now. The narrow, cheap slice is the cross-chec
 (2): computable inside `review` from data already in hand (`faces.npy` +
 `clusters.csv.bak` + prior labels), needing no new artifact or workflow step.
 
-## Deferred: detecting faces *inside* videos
+## Detecting faces *inside* videos — the `video` command ✅ built
 
-The `serve` video support above is view-only. The natural follow-on — "who is in
-each video?", so a clip flows through `cluster`/`assign`/`query` like a photo —
-was scoped and **deliberately deferred**. It's a real pipeline change, not a tweak,
-and the design is recorded here so it can be picked up cleanly.
+The `serve` video support above is view-only. The follow-on — "who is in each
+video?" — is **built** as `faces.py video`, deliberately as a *standalone naming
+pass* rather than full pipeline integration. It samples frames, runs the existing
+`buffalo_l` detector+recognizer on each, matches every face to the **already-labeled**
+photo clusters, and writes `video_people.csv` (`filename, names, n_named, peaks`).
+`serve` overlays those names onto clips. The face pipeline (`embed`/`cluster`/
+`assign`/`query`) is byte-for-byte untouched — `video` only *reads* `faces.npy` +
+`clusters.csv` + `labels.csv`.
 
-**Sketch.** Sample frames (≈1 fps is plenty for "is this kid present"), run the
-existing `buffalo_l` detector+recognizer on each sampled frame, and fold the
-results into the same `faces.*` tables the photo path already uses. The embedding,
-clustering, labeling, and query layers are all identity-based and would work
-unchanged — the work is entirely in *getting frames in* and *not drowning the
-clustering in near-duplicates*.
+### Why standalone, not full integration
 
-**The four problems that make it more than a loop:**
+The tempting design folds video faces into `faces.csv` so a clip flows through
+`cluster`/`assign`/`query` like a photo. That was **rejected for v1** because the
+album is already labeled, which collapses the cost:
 
-1. **Identity of a "face in a video."** `faces.csv`'s `filename` column is assumed
-   openable as an image by every downstream stage (`review` crops it, `assign`
-   groups by it, `serve` reads its bytes). A video face needs a frame-qualified key
-   — e.g. `trip/clip.mov#t=12.0` — and every consumer that does `album / filename`
-   must learn to split off the `#t=` and extract that frame instead of `Image.open`.
-   That ripples through `review`'s crop step, `assign`'s per-image grouping (all
-   frames of one clip should roll up to the *clip*, not 90 separate "photos"), and
-   `serve`'s thumbnailer.
+- **It protects the calibration.** Dumping thousands of motion-blurred video faces
+  into `cluster` perturbs HDBSCAN's density — the exact failure mode this doc warns
+  about — risking the *photo* clusters. Matching against existing centroids instead
+  leaves them alone.
+- **It sidesteps the load-bearing problem (per-clip dedup).** Folding faces in
+  means a kid on screen for 10s at 1 fps adds ~10 near-duplicate embeddings that
+  swamp clustering and inflate counts, so they'd need collapsing into one medoid per
+  (video, identity) track. But for a *name set per clip*, a name matched 50× is still
+  one set member — so **no dedup is needed at all**. The hardest piece simply
+  disappears.
+- **It reuses calibrated machinery.** Naming = nearest labeled centroid at the
+  calibrated **0.35** threshold with a runner-up **margin** — literally
+  `assign --recover`'s logic. That math is now the shared, unit-tested
+  `match_to_centroids`; `build_name_centroids` builds one centroid per *name*
+  (merging a kid's split clusters, so the margin test is name-vs-name).
 
-2. **Per-(video, identity) dedup — the load-bearing one.** A child standing in
-   frame for 10s at 1 fps yields ~10 near-identical embeddings. Left raw, a few
-   long clips would dominate `cluster` (HDBSCAN density is sensitive to exactly
-   this) and wildly inflate per-child photo counts. So within each video, faces
-   must be collapsed by identity before they enter `faces.npy` — e.g. online
-   agglomeration at the calibrated 0.35 threshold, keeping one medoid embedding per
-   (video, identity) track plus a representative frame timestamp for `review`.
+### Mechanics
 
-3. **Cost, and keeping `embed` resumable.** 704 clips × N frames × detection is the
-   same order of magnitude as the 40-min photo embed. It must reuse the
-   `faces.done` manifest + crash-safe `.emb`/`.csv` journal so it's resumable per
-   clip, and it should be opt-in (`embed --videos`) so the photo-only run stays the
-   fast default. Frame decode would go through `ffmpeg`/PyAV rather than Pillow.
+- **Frames** via `ffmpeg` (`_sample_video_frames`, default 1 fps, optional
+  `--max-frames` cap so one long clip can't dominate). ffmpeg-gated like the poster
+  thumbnails: no ffmpeg → no frames → the clip just records zero names.
+- **Resumable** like `embed`: a `video_people.done` manifest records each scanned
+  clip. The csv is rewritten *before* the manifest append, so the manifest never
+  gets ahead of the csv and resume is lossless. It's opt-in (a separate command),
+  since at ~detector-inference-per-frame it's a mini-embed (~18 min for this
+  album's 704 clips at 1 fps).
+- **Noise control** is the `cluster`-style lever applied up front: `--min-size`
+  drops tiny faces, and the threshold+margin keep ambiguous matches out. Video
+  faces are weaker (blur, angle) so the defaults stay conservative.
 
-4. **Recall vs. noise tradeoff.** Motion blur and odd angles make video faces
-   weaker on average than posed photo faces; the existing `cluster` pre-filter
-   (`--min-size`/`--min-det`) is the right lever, but may want separate thresholds
-   for video-sourced faces.
+### Still deferred: full integration
 
-**Why deferred, not dropped.** The view-only layer delivers most of the day-to-day
-value (you can *find and watch* the clips now) for a fraction of the cost and zero
-risk to the calibrated photo pipeline. The face-in-video work is a multi-stage
-change touching the one expensive, carefully-journaled stage (`embed`) plus every
-downstream consumer's filename assumption — worth doing behind an opt-in flag when
-"query videos by who's in them" becomes a real need, not before. Problem (2) is the
-one to prototype first: if per-clip dedup is clean, the rest is plumbing.
+If "`query` videos by who's in them" (or discovering a kid who appears *only* in
+videos) ever becomes a real need, the full-integration path remains open: give each
+video face a frame-qualified key (`trip/clip.mov#t=12.0`), teach every `album /
+filename` consumer to split the `#t=` and extract that frame, roll a clip's frames
+up in `assign`, and add the per-(video, identity) dedup described above. The
+standalone pass covers the day-to-day "who's in this clip" need at a fraction of the
+cost and zero risk, so that larger change waits until it's actually warranted.

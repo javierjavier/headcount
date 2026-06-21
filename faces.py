@@ -912,6 +912,59 @@ def _materialize(filenames, name: str, album: Path, base: Path, copy: bool) -> i
     return n
 
 
+def match_to_centroids(embs: np.ndarray, cents: np.ndarray,
+                       thresh: float, margin: float) -> np.ndarray:
+    """For each row of *embs*, the index of its nearest centroid — or -1.
+
+    A match is accepted only if it clears *thresh* AND beats the second-nearest
+    centroid by *margin*, the same strict two-test rule `assign --recover` uses to
+    keep ambiguous faces out. Both *embs* and *cents* are assumed L2-normalized,
+    so the dot product is cosine similarity. With a single centroid the margin is
+    vacuous (no runner-up), so only the threshold applies. Pure NumPy — unit-tested.
+    """
+    out = np.full(len(embs), -1, dtype=int)
+    if len(embs) == 0 or len(cents) == 0:
+        return out
+    sims = embs.astype(np.float32) @ cents.T
+    order = np.argsort(-sims, axis=1)
+    ar = np.arange(len(embs))
+    best_idx = order[:, 0]
+    best = sims[ar, best_idx]
+    if cents.shape[0] >= 2:
+        second = sims[ar, order[:, 1]]
+    else:
+        second = np.full(len(embs), -np.inf, dtype=np.float32)
+    ok = (best >= thresh) & ((best - second) >= margin)
+    out[ok] = best_idx[ok]
+    return out
+
+
+def build_name_centroids(rows: list[dict], clusters: dict[str, int],
+                         labels: dict[int, str], mat: np.ndarray):
+    """Per-NAME mean embedding (L2-normalized) over every labeled face.
+
+    Unlike `assign --recover`'s per-cluster centroids, clusters that share a name
+    (a kid split across several clusters — the expected case, see DESIGN.md) are
+    merged into one centroid, so `match_to_centroids`' margin test is genuinely
+    name-vs-name rather than cluster-vs-cluster. Returns (names, cents) with
+    `cents[i]` the centroid for `names[i]`; names sorted for determinism.
+    """
+    from collections import defaultdict
+
+    by_name: dict[str, list] = defaultdict(list)
+    for i, r in enumerate(rows):
+        name = labels.get(clusters.get(r["face_id"], -2))
+        if name:
+            by_name[name].append(i)
+    names = sorted(by_name)
+    dim = mat.shape[1] if mat.ndim == 2 and mat.shape[0] else EMB_DIM
+    if not names:
+        return [], np.zeros((0, dim), dtype=np.float32)
+    cents = np.vstack([mat[by_name[nm]].mean(0) for nm in names]).astype(np.float32)
+    cents /= np.linalg.norm(cents, axis=1, keepdims=True)
+    return names, cents
+
+
 def cmd_assign(args) -> int:
     rows = read_face_rows(Path(args.faces))
     if not rows:
@@ -976,16 +1029,11 @@ def cmd_assign(args) -> int:
             cent = np.vstack([mat[members[c]].mean(0) for c in cids])
             cent /= np.linalg.norm(cent, axis=1, keepdims=True)
             pool = [i for i, r in enumerate(rows) if clusters.get(r["face_id"], -2) not in labels]
-            sims = mat[pool].astype(np.float32) @ cent.T
-            order = np.argsort(-sims, axis=1)
-            ar = np.arange(len(pool))
-            best = sims[ar, order[:, 0]]
-            second = sims[ar, order[:, 1]]
-            ok = (best >= args.recover_thresh) & ((best - second) >= args.recover_margin)
+            picks = match_to_centroids(mat[pool], cent, args.recover_thresh, args.recover_margin)
             n = 0
             for k, i in enumerate(pool):
-                if ok[k]:
-                    img_names.setdefault(rows[i]["filename"], set()).add(cnames[order[k, 0]])
+                if picks[k] >= 0:
+                    img_names.setdefault(rows[i]["filename"], set()).add(cnames[picks[k]])
                     n += 1
             print(f"recovered {n} faces (thresh {args.recover_thresh}, margin {args.recover_margin})")
 
@@ -1018,6 +1066,137 @@ def cmd_assign(args) -> int:
         for name, fns in sorted(per_name.items()):
             n = _materialize(fns, name, Path(args.album), base, args.copy)
             print(f"  {name}/: {n}")
+    return 0
+
+
+VIDEO_PEOPLE_HEADER = ["filename", "names", "n_named", "peaks"]
+
+
+def _write_video_people(out_csv: Path, results: dict[str, list]) -> None:
+    """Rewrite video_people.csv from the *results* map (filename -> row).
+
+    Called after each processed clip and ordered *before* the .done append, so the
+    csv is never behind the manifest: a clip marked done is guaranteed to have its
+    row persisted, which is what makes resume lossless.
+    """
+    with out_csv.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(VIDEO_PEOPLE_HEADER)
+        for fn in sorted(results):
+            w.writerow(results[fn])
+
+
+def cmd_video(args) -> int:
+    album = Path(args.album)
+    try:
+        videos = list_videos(album)
+    except Exception as e:  # noqa: BLE001
+        print(e, file=sys.stderr)
+        return 1
+    if not videos:
+        print(f"No videos found under '{album}'.", file=sys.stderr)
+        return 1
+
+    # Name faces against the ALREADY-labeled photo clusters — no re-clustering, so
+    # the calibrated photo pipeline is untouched (see DESIGN.md, "faces in video").
+    faces_csv = Path(args.faces)
+    try:
+        rows, mat = load_faces(faces_csv)
+    except (FileNotFoundError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    clusters_path = Path(args.clusters)
+    if not clusters_path.exists():
+        print(f"{clusters_path} not found — run `cluster` first.", file=sys.stderr)
+        return 1
+    try:
+        clusters = load_cluster_map(rows, clusters_path)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+    labels = _read_labels(Path(args.labels))
+    if not labels:
+        print(f"No names in {args.labels} — run `review`/`assign` first, then label.",
+              file=sys.stderr)
+        return 1
+    names, cents = build_name_centroids(rows, clusters, labels, mat)
+    if not names:
+        print("No labeled faces to match against — fill in labels.csv first.", file=sys.stderr)
+        return 1
+
+    out_csv = Path(args.out)
+    done_path = out_csv.with_suffix(".done")
+    done = read_done_manifest(done_path)
+    # Preserve rows already computed (resume / re-run); new scans overwrite their key.
+    results: dict[str, list] = {r["filename"]: [r.get(c, "") for c in VIDEO_PEOPLE_HEADER]
+                                for r in read_face_rows(out_csv)}
+    todo = [v for v in videos if rel_key(v, album) not in done]
+    if args.limit:
+        todo = todo[: args.limit]
+
+    print(f"{len(videos)} videos, {len(done)} already scanned, {len(todo)} to scan; "
+          f"matching against {len(names)} labeled names "
+          f"(thresh {args.thresh}, margin {args.margin}, {args.fps} fps).")
+    if not todo:
+        print("Nothing to do. (Delete the .done manifest to re-scan.)")
+        return 0
+
+    print(f"Loading detector (buffalo_l, det_size={args.det_size}) ...")
+    app = build_face_app(det_size=args.det_size, det_thresh=args.det_thresh)
+
+    seq = todo
+    try:
+        from tqdm import tqdm
+        seq = tqdm(todo, unit="vid")
+    except ImportError:
+        pass
+
+    n_named_videos = 0
+    with done_path.open("a") as df:
+        for v in seq:
+            key = rel_key(v, album)
+            # name -> [count, best_sim, best_t]; a name added many times is still one
+            # set member, so no per-clip dedup is needed for the name set itself.
+            hits: dict[str, list] = {}
+            for t, frame in _sample_video_frames(v, args.fps, args.max_frames):
+                try:
+                    faces = app.get(frame)
+                except Exception as e:  # noqa: BLE001 - one bad frame shouldn't abort the clip
+                    print(f"\n  ! {key} @ {t:.0f}s: {e}")
+                    continue
+                faces = [f for f in faces
+                         if max(f.bbox[2] - f.bbox[0], f.bbox[3] - f.bbox[1]) >= args.min_size]
+                if not faces:
+                    continue
+                embs = np.vstack([f.normed_embedding for f in faces]).astype(np.float32)
+                sims = embs @ cents.T
+                picks = match_to_centroids(embs, cents, args.thresh, args.margin)
+                for j, pick in enumerate(picks):
+                    if pick < 0:
+                        continue
+                    nm = names[pick]
+                    sim = float(sims[j, pick])
+                    rec = hits.setdefault(nm, [0, -1.0, 0.0])
+                    rec[0] += 1
+                    if sim > rec[1]:
+                        rec[1], rec[2] = sim, t
+            present = sorted(hits)
+            n_named = sum(int(hits[nm][0]) for nm in present)
+            peaks = ";".join(f"{nm}@{hits[nm][2]:.1f}" for nm in present)
+            results[key] = [key, ";".join(present), str(n_named), peaks]
+            if present:
+                n_named_videos += 1
+            # csv first, then mark done — so the manifest never gets ahead of the csv.
+            _write_video_people(out_csv, results)
+            df.write(key + "\n")
+            df.flush()
+
+    from collections import Counter
+
+    counts = Counter(nm for r in results.values() for nm in filter(None, r[1].split(";")))
+    print(f"\nScanned {len(todo)} video(s); {n_named_videos} have >=1 named person -> {out_csv}")
+    for nm, c in counts.most_common():
+        print(f"  {nm}: {c} videos")
     return 0
 
 
@@ -1705,6 +1884,40 @@ def _video_poster(path: Path):
     return None
 
 
+def _sample_video_frames(path: Path, fps: float, max_frames: int = 0):
+    """Yield (t_seconds, BGR ndarray) frames sampled from *path* at ~*fps*.
+
+    ffmpeg decodes the whole clip once and writes the sampled frames to a temp
+    dir (cheaper and simpler than seeking per frame); we then hand them out one at
+    a time as the BGR arrays insightface expects. Yields nothing if ffmpeg is
+    missing or the clip can't be decoded — the caller just records zero faces.
+    With *max_frames* > 0 a long clip is evenly down-sampled to that many frames
+    so one outlier video can't dominate the run.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path),
+                 "-vf", f"fps={fps}", "-qscale:v", "3", str(tdp / "%06d.jpg")],
+                capture_output=True, timeout=600, check=False,
+            )
+        except Exception:  # noqa: BLE001 - no ffmpeg / hang -> no frames
+            return
+        frames = sorted(tdp.glob("*.jpg"))
+        if max_frames and len(frames) > max_frames:
+            frames = _even_sample(frames, max_frames)
+        for fp in frames:
+            try:
+                t = (int(fp.stem) - 1) / fps          # %06d is 1-indexed
+                yield t, load_image_bgr(fp)
+            except Exception:  # noqa: BLE001 - skip a single unreadable frame
+                continue
+
+
 def _placeholder_thumb(size: int):
     """A neutral film-strip tile for a video with no extractable poster frame."""
     from PIL import Image, ImageDraw
@@ -1839,6 +2052,14 @@ def cmd_serve(args) -> int:
             hours[r["filename"]] = int(h) if h and h.isdigit() else None
             scenes[r["filename"]] = r.get("scene") or ""
 
+    # Optional video-name overlay — present iff a `video` pass has been run, so
+    # clips get the same name filter/caption treatment as photos.
+    vpeople = {}
+    vp = Path(args.video_people)
+    if vp.exists():
+        vpeople = {r["filename"]: sorted(filter(None, (r.get("names") or "").split(";")))
+                   for r in read_face_rows(vp)}
+
     album = Path(args.album)
     # `k` is a filesystem-safe key used for thumb/full/video URLs and as the cache
     # filename; `f` is the real album-relative path used to read original bytes.
@@ -1858,7 +2079,7 @@ def cmd_serve(args) -> int:
         items.append(it)
         by_key[keys[fn]] = it
     for fn in video_fns:
-        it = {"k": keys[fn], "f": fn, "n": [], "h": None, "s": "", "v": True}
+        it = {"k": keys[fn], "f": fn, "n": vpeople.get(fn, []), "h": None, "s": "", "v": True}
         items.append(it)
         by_key[keys[fn]] = it
     if not items:
@@ -2187,10 +2408,35 @@ def main() -> int:
     p_scn.add_argument("--prefetch", type=int, default=4, help="background decode threads (default: 4)")
     p_scn.set_defaults(func=cmd_scene)
 
+    p_vid = sub.add_parser("video",
+                           help="detect + name faces in album videos -> video_people.csv (uses existing labels)")
+    p_vid.add_argument("--album", default="album", help="album folder (default: album/)")
+    p_vid.add_argument("--faces", default="faces.csv", help="face table (default: faces.csv)")
+    p_vid.add_argument("--clusters", default="clusters.csv", help="cluster assignment (default: clusters.csv)")
+    p_vid.add_argument("--labels", default="labels.csv", help="filled-in labels (default: labels.csv)")
+    p_vid.add_argument("--out", default="video_people.csv", help="who-is-in-each-video index")
+    p_vid.add_argument("--fps", type=float, default=1.0,
+                       help="frames sampled per second of video (default: 1.0)")
+    p_vid.add_argument("--max-frames", type=int, default=0,
+                       help="evenly down-sample to at most this many frames per clip (0 = no cap)")
+    p_vid.add_argument("--thresh", type=float, default=0.35,
+                       help="min cosine similarity to a name centroid to count (default: 0.35, calibrated)")
+    p_vid.add_argument("--margin", type=float, default=0.05,
+                       help="matched name must beat the runner-up name by this (default: 0.05)")
+    p_vid.add_argument("--min-size", type=int, default=40,
+                       help="ignore detected faces whose bbox side is under this many px (default: 40)")
+    p_vid.add_argument("--det-size", type=int, default=640,
+                       help="detector input size; video frames are smaller than photos (default: 640)")
+    p_vid.add_argument("--det-thresh", type=float, default=0.4, help="detector confidence (default: 0.4)")
+    p_vid.add_argument("--limit", type=int, default=0, help="only scan first N videos (for testing)")
+    p_vid.set_defaults(func=cmd_video)
+
     p_srv = sub.add_parser("serve", help="local web browser: name/time filters + zip export (localhost only)")
     p_srv.add_argument("--album", default="album", help="album folder (default: album/)")
     p_srv.add_argument("--image-people", default="image_people.csv", help="index from `assign`")
     p_srv.add_argument("--scene", default="scene.csv", help="scene/hour index from `scene` (optional)")
+    p_srv.add_argument("--video-people", default="video_people.csv",
+                       help="per-video name index from `video` (optional)")
     p_srv.add_argument("--cache", default=".serve_cache", help="thumbnail cache dir (default: .serve_cache/)")
     p_srv.add_argument("--thumb", type=int, default=768, help="thumbnail long edge in px (default: 768)")
     p_srv.add_argument("--prefetch", type=int, default=4, help="background decode threads for thumbs (default: 4)")
