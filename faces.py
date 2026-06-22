@@ -2124,14 +2124,17 @@ def cmd_serve(args) -> int:
         for r in read_face_rows(ip)
     }
 
-    # Per-photo face count (how crowded the shot is) from faces.csv, using the
-    # same size/det pre-filter as `cluster` so tiny / low-confidence detections
-    # don't inflate the count. Powers the gallery's min/max-faces slider. A photo
-    # that WAS embedded but has no face clearing the threshold counts as 0 (its
-    # only faces are too small/blurry to count) — so it drops out of "1+" filters.
-    # A photo that's not in faces.csv at all (or when faces.csv is missing) has a
-    # genuinely unknown count -> null -> always passes, like unknown-hour items.
-    # (Videos get their count from the `video` pass — see video items below.)
+    # Per-photo face count (how crowded the shot is): the number of faces the
+    # detector found, i.e. every faces.csv row for the photo. Powers the gallery's
+    # min/max-faces slider. NOTE: this deliberately does NOT reuse `cluster`'s
+    # size/det pre-filter — that threshold drops faces whose *embeddings* are too
+    # noisy to identify, which is unrelated to a headcount. A distant group shot
+    # has many small-but-clearly-detected faces and the slider should count them
+    # all; the detector already gates on confidence at embed time (det_thresh), so
+    # the raw row count is the right "how many faces are in this photo" answer.
+    # A photo not in faces.csv (or when faces.csv is missing) has a genuinely
+    # unknown count -> null -> always passes, like unknown-hour items. (Videos get
+    # their count from the `video` pass — see video items below.)
     face_counts: dict[str, int] = {}
     embedded: set[str] = set()
     fcsv = Path(args.faces)
@@ -2141,8 +2144,7 @@ def cmd_serve(args) -> int:
         fc = Counter()
         for r in read_face_rows(fcsv):
             embedded.add(r["filename"])
-            if _face_size(r) >= args.min_size and float(r["det_score"]) >= args.min_det:
-                fc[r["filename"]] += 1
+            fc[r["filename"]] += 1
         face_counts = dict(fc)
 
     # Optional scene/hour overlay — present iff a `scene` pass has been run.
@@ -2589,10 +2591,6 @@ def main() -> int:
     p_srv.add_argument("--image-people", default="image_people.csv", help="index from `assign`")
     p_srv.add_argument("--faces", default="faces.csv",
                        help="face index from `embed` — powers the face-count filter (optional)")
-    p_srv.add_argument("--min-size", type=int, default=40,
-                       help="face-count filter: min bbox side in px, matches `cluster` (default: 40)")
-    p_srv.add_argument("--min-det", type=float, default=0.5,
-                       help="face-count filter: min det_score, matches `cluster` (default: 0.5)")
     p_srv.add_argument("--scene", default="scene.csv", help="scene/hour index from `scene` (optional)")
     p_srv.add_argument("--video-people", default="video_people.csv",
                        help="per-video name index from `video` (optional)")
