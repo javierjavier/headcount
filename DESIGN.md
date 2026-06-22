@@ -186,6 +186,36 @@ marker and clears + rebuilds when `--thumb` changes. Without this the per-key
 `exists()` skip would silently keep serving whatever size was built first — a
 smaller value later looks fine, a larger one stays blurry, with no signal why.
 
+### Videos: a view-only layer over `serve`
+
+`serve` also lists videos found in `album/` (`common.VIDEO_EXTS`). This is
+deliberately a **presentation-only** addition — the face pipeline is untouched:
+`embed`/`cluster`/`assign`/`query` still read images only, and videos carry no
+names (until the optional `video` command names them — see below). They're
+discovered straight from disk (not from `image_people.csv`), keyed
+through the same `assign_thumb_keys` collision scheme as photos (a video and photo
+can share a stem), and merged into the same grid/lightbox/export/filter machinery.
+
+Three things needed handling that photos didn't:
+
+- **Thumbnails.** No Pillow path decodes a video, so a poster frame is pulled with
+  `ffmpeg` (seek ~1s in to skip black intros). ffmpeg is treated as an *optional
+  system tool*, not a new pip dependency — missing it degrades to a film-strip
+  placeholder tile rather than dropping the video, keeping the pure-pip install
+  story intact. Posters cache in `.serve_cache/` next to photo thumbs, so the
+  existing size-aware sweep and orphan-prune cover them for free.
+- **Capture time.** Photos read EXIF; videos have none. `_video_dt` reads the
+  container `creation_time` via `ffprobe` and converts it from UTC (how iPhone
+  stores it) to local so videos date-group consistently with the photos' local
+  EXIF clock, falling back to file mtime. The hour is derived from that for the
+  time-of-day filter.
+- **Streaming.** A `<video>` element won't play off a plain 200 — browsers expect
+  `Accept-Ranges`/206 partial responses so a seek fetches only the needed slice.
+  The handler grows a Range-aware file streamer; the header parsing is factored
+  into the pure, unit-tested `parse_byte_range` (full / suffix / open-ended /
+  unsatisfiable→416). Codec support is the browser's: H.264 `.mp4` is universal,
+  HEVC `.mov` is Safari-only — so the lightbox always offers a download link.
+
 ## Data artifacts
 
 | File | Phase | Contents |
@@ -197,6 +227,7 @@ smaller value later looks fine, a larger one stays blurry, with no signal why.
 | `clusters.csv` | cluster | `face_id → cluster_id` |
 | `labels.csv` | review | `cluster_id → name` (human-edited) |
 | `image_people.csv` | assign | `filename → set of names` |
+| `video_people.csv` | video | `video → set of names` (+ `n_named`, peak frame per name); `video_people.done` is its resume manifest |
 | `by_child/<name>/`, `query/<expr>/` | assign/query | output copies |
 
 All of these contain biometric data and stay gitignored (see below).
@@ -291,3 +322,60 @@ clusters, so anchors are insurance against a re-embed and a reusable asset for a
 future album — not load-bearing now. The narrow, cheap slice is the cross-check in
 (2): computable inside `review` from data already in hand (`faces.npy` +
 `clusters.csv.bak` + prior labels), needing no new artifact or workflow step.
+
+## Detecting faces *inside* videos — the `video` command ✅ built
+
+The `serve` video support above is view-only. The follow-on — "who is in each
+video?" — is **built** as `faces.py video`, deliberately as a *standalone naming
+pass* rather than full pipeline integration. It samples frames, runs the existing
+`buffalo_l` detector+recognizer on each, matches every face to the **already-labeled**
+photo clusters, and writes `video_people.csv` (`filename, names, n_named, peaks`).
+`serve` overlays those names onto clips. The face pipeline (`embed`/`cluster`/
+`assign`/`query`) is byte-for-byte untouched — `video` only *reads* `faces.npy` +
+`clusters.csv` + `labels.csv`.
+
+### Why standalone, not full integration
+
+The tempting design folds video faces into `faces.csv` so a clip flows through
+`cluster`/`assign`/`query` like a photo. That was **rejected for v1** because the
+album is already labeled, which collapses the cost:
+
+- **It protects the calibration.** Dumping thousands of motion-blurred video faces
+  into `cluster` perturbs HDBSCAN's density — the exact failure mode this doc warns
+  about — risking the *photo* clusters. Matching against existing centroids instead
+  leaves them alone.
+- **It sidesteps the load-bearing problem (per-clip dedup).** Folding faces in
+  means a kid on screen for 10s at 1 fps adds ~10 near-duplicate embeddings that
+  swamp clustering and inflate counts, so they'd need collapsing into one medoid per
+  (video, identity) track. But for a *name set per clip*, a name matched 50× is still
+  one set member — so **no dedup is needed at all**. The hardest piece simply
+  disappears.
+- **It reuses calibrated machinery.** Naming = nearest labeled centroid at the
+  calibrated **0.35** threshold with a runner-up **margin** — literally
+  `assign --recover`'s logic. That math is now the shared, unit-tested
+  `match_to_centroids`; `build_name_centroids` builds one centroid per *name*
+  (merging a kid's split clusters, so the margin test is name-vs-name).
+
+### Mechanics
+
+- **Frames** via `ffmpeg` (`_sample_video_frames`, default 1 fps, optional
+  `--max-frames` cap so one long clip can't dominate). ffmpeg-gated like the poster
+  thumbnails: no ffmpeg → no frames → the clip just records zero names.
+- **Resumable** like `embed`: a `video_people.done` manifest records each scanned
+  clip. The csv is rewritten *before* the manifest append, so the manifest never
+  gets ahead of the csv and resume is lossless. It's opt-in (a separate command),
+  since at ~detector-inference-per-frame it's a mini-embed (~18 min for this
+  album's 704 clips at 1 fps).
+- **Noise control** is the `cluster`-style lever applied up front: `--min-size`
+  drops tiny faces, and the threshold+margin keep ambiguous matches out. Video
+  faces are weaker (blur, angle) so the defaults stay conservative.
+
+### Still deferred: full integration
+
+If "`query` videos by who's in them" (or discovering a kid who appears *only* in
+videos) ever becomes a real need, the full-integration path remains open: give each
+video face a frame-qualified key (`trip/clip.mov#t=12.0`), teach every `album /
+filename` consumer to split the `#t=` and extract that frame, roll a clip's frames
+up in `assign`, and add the per-(video, identity) dedup described above. The
+standalone pass covers the day-to-day "who's in this clip" need at a fraction of the
+cost and zero risk, so that larger change waits until it's actually warranted.

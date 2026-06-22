@@ -16,6 +16,8 @@ faces*.done
 clusters*.csv
 labels*.csv
 image_people*.csv
+video_people*.csv
+video_people*.done
 scene*.csv
 # backups of the above (review/cluster write *.bak) — same biometric content
 *.bak
