@@ -1450,6 +1450,12 @@ SERVE_PAGE = """<!doctype html>
       <label><input type="radio" name="mode" value="all" checked> all of</label>
       <label><input type="radio" name="mode" value="any"> any of</label>
     </div>
+    <select id="nsort" style="margin-top:8px">
+      <option value="az">Name A → Z</option>
+      <option value="za">Name Z → A</option>
+      <option value="hi">Most photos</option>
+      <option value="lo">Fewest photos</option>
+    </select>
     <div class="names" id="names"></div>
     <h2>Faces</h2>
     <div class="rangewrap" id="fcwrap">
@@ -1520,7 +1526,7 @@ SERVE_PAGE = """<!doctype html>
 
 <script>
 const DATA = __MANIFEST__;
-const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, scene:"", media:{photo:true, live:true, video:true}, search:"", sort:"new", cell:150 };
+const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, scene:"", media:{photo:true, live:true, video:true}, search:"", sort:"new", nsort:"az", cell:150 };
 const LIVE_MAX = DATA.liveMax || 3.5;   // videos <= this many seconds are "live photos"
 // media bucket for an item: photo / live (short clip) / video (everything else,
 // incl. clips whose duration is unknown so they're never hidden as "live").
@@ -1542,7 +1548,7 @@ S.fmin = FCMIN; S.fmax = FCMAX;
 const SKEY = "headcount.filters.v1";
 function saveState() {
   try { localStorage.setItem(SKEY, JSON.stringify({
-    names:[...S.names], mode:S.mode, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, scene:S.scene, media:S.media, sort:S.sort, cell:S.cell
+    names:[...S.names], mode:S.mode, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, scene:S.scene, media:S.media, sort:S.sort, nsort:S.nsort, cell:S.cell
   })); } catch (e) {}
 }
 function loadState() {
@@ -1562,6 +1568,7 @@ function loadState() {
     for (const k of ["photo", "live", "video"]) if (typeof v.media[k] === "boolean") S.media[k] = v.media[k];
   }
   if (v.sort === "old" || v.sort === "new") S.sort = v.sort;
+  if (["az","za","hi","lo"].includes(v.nsort)) S.nsort = v.nsort;
   if (typeof v.cell === "number") S.cell = Math.min(Math.max(v.cell, 90), 300);
 }
 loadState();
@@ -1701,7 +1708,13 @@ function buildNames() {
   const counts = {};
   for (const n of DATA.names) counts[n] = 0;
   for (const it of DATA.items) for (const n of it.n) counts[n] = (counts[n]||0) + 1;
-  for (const n of DATA.names) {
+  // Order the roster by the chosen key; ties (and equal counts) fall back to A→Z.
+  const order = [...DATA.names].sort((a, b) =>
+    S.nsort === "za" ? b.localeCompare(a) :
+    S.nsort === "hi" ? (counts[b] - counts[a]) || a.localeCompare(b) :
+    S.nsort === "lo" ? (counts[a] - counts[b]) || a.localeCompare(b) :
+    a.localeCompare(b));
+  for (const n of order) {
     if (S.search && !n.toLowerCase().includes(S.search)) continue;
     const lab = document.createElement("label");
     const cb = document.createElement("input");
@@ -1769,6 +1782,8 @@ document.addEventListener("keydown", e => {
 });
 
 $("nsearch").oninput = e => { S.search = e.target.value.trim().toLowerCase(); buildNames(); };
+$("nsort").value = S.nsort;
+$("nsort").onchange = e => { S.nsort = e.target.value; buildNames(); saveState(); };
 for (const r of document.querySelectorAll('input[name=mode]')) {
   r.checked = (r.value === S.mode);
   r.onchange = e => { S.mode = e.target.value; render(); };
