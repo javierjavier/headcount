@@ -1448,6 +1448,14 @@ SERVE_PAGE = """<!doctype html>
       <label><input type="radio" name="mode" value="any"> any of</label>
     </div>
     <div class="names" id="names"></div>
+    <h2>Faces</h2>
+    <div class="rangewrap" id="fcwrap">
+      <div class="track"></div>
+      <div class="fill" id="ffill"></div>
+      <input type="range" id="fmin" step="1">
+      <input type="range" id="fmax" step="1">
+    </div>
+    <div class="hourlab" id="faclab"></div>
     <h2>Time of day</h2>
     <div class="rangewrap">
       <div class="track"></div>
@@ -1509,7 +1517,7 @@ SERVE_PAGE = """<!doctype html>
 
 <script>
 const DATA = __MANIFEST__;
-const S = { names:new Set(), mode:"all", hmin:0, hmax:23, scene:"", media:{photo:true, live:true, video:true}, search:"", sort:"new", cell:150 };
+const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, scene:"", media:{photo:true, live:true, video:true}, search:"", sort:"new", cell:150 };
 const LIVE_MAX = DATA.liveMax || 3.5;   // videos <= this many seconds are "live photos"
 // media bucket for an item: photo / live (short clip) / video (everything else,
 // incl. clips whose duration is unknown so they're never hidden as "live").
@@ -1521,11 +1529,17 @@ const hrs = DATA.items.map(i => i.h).filter(h => h !== null);
 const HMIN = hrs.length ? Math.min(...hrs) : 0, HMAX = hrs.length ? Math.max(...hrs) : 23;
 S.hmin = HMIN; S.hmax = HMAX;
 
+// face-count bounds present in the data (items with a known count; videos/
+// uncounted photos are null and ignored here — they always pass the filter)
+const fcs = DATA.items.map(i => i.fc).filter(c => c !== null && c !== undefined);
+const FCMIN = fcs.length ? Math.min(...fcs) : 0, FCMAX = fcs.length ? Math.max(...fcs) : 0;
+S.fmin = FCMIN; S.fmax = FCMAX;
+
 // --- persist filters across refreshes (per-origin localStorage) ---
 const SKEY = "headcount.filters.v1";
 function saveState() {
   try { localStorage.setItem(SKEY, JSON.stringify({
-    names:[...S.names], mode:S.mode, hmin:S.hmin, hmax:S.hmax, scene:S.scene, media:S.media, sort:S.sort, cell:S.cell
+    names:[...S.names], mode:S.mode, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, scene:S.scene, media:S.media, sort:S.sort, cell:S.cell
   })); } catch (e) {}
 }
 function loadState() {
@@ -1534,6 +1548,9 @@ function loadState() {
   const known = new Set(DATA.names);                              // drop names absent from this album
   if (Array.isArray(v.names)) S.names = new Set(v.names.filter(n => known.has(n)));
   if (v.mode === "all" || v.mode === "any") S.mode = v.mode;
+  if (typeof v.fmin === "number") S.fmin = Math.min(Math.max(v.fmin, FCMIN), FCMAX);   // clamp to data bounds
+  if (typeof v.fmax === "number") S.fmax = Math.min(Math.max(v.fmax, FCMIN), FCMAX);
+  if (S.fmin > S.fmax) { S.fmin = FCMIN; S.fmax = FCMAX; }
   if (typeof v.hmin === "number") S.hmin = Math.min(Math.max(v.hmin, HMIN), HMAX);   // clamp to data bounds
   if (typeof v.hmax === "number") S.hmax = Math.min(Math.max(v.hmax, HMIN), HMAX);
   if (S.hmin > S.hmax) { S.hmin = HMIN; S.hmax = HMAX; }
@@ -1577,6 +1594,7 @@ function matches(it) {
     if (S.mode === "all" && has < S.names.size) return false;
     if (S.mode === "any" && has === 0) return false;
   }
+  if (it.fc != null && (it.fc < S.fmin || it.fc > S.fmax)) return false; // uncounted item always passes
   if (it.h !== null && (it.h < S.hmin || it.h > S.hmax)) return false;   // unknown hour always passes
   if (S.scene && it.s && it.s !== S.scene) return false;                 // unknown scene always passes
 
@@ -1666,6 +1684,13 @@ function render() {
 function hourLabel() {
   $("hourlab").textContent = (S.hmin === HMIN && S.hmax === HMAX)
     ? "Any time" : (String(S.hmin).padStart(2,"0") + ":00 – " + String(S.hmax).padStart(2,"0") + ":59");
+}
+
+function faceLabel() {
+  const lab = $("faclab");
+  if (S.fmin === FCMIN && S.fmax === FCMAX) lab.textContent = "Any number";
+  else if (S.fmin === S.fmax) lab.textContent = S.fmin + (S.fmin === 1 ? " face" : " faces");
+  else lab.textContent = S.fmin + " – " + S.fmax + " faces";
 }
 
 function buildNames() {
@@ -1758,6 +1783,24 @@ function updFill() {
 }
 hmin.oninput = e => { S.hmin = Math.min(+e.target.value, S.hmax); e.target.value = S.hmin; hourLabel(); updFill(); render(); };
 hmax.oninput = e => { S.hmax = Math.max(+e.target.value, S.hmin); e.target.value = S.hmax; hourLabel(); updFill(); render(); };
+// dual range over the face-count bounds. Hidden when there's no spread to filter
+// on (no faces.csv, or every counted item has the same count).
+const fmin = $("fmin"), fmax = $("fmax");
+if (FCMIN === FCMAX) {
+  $("fcwrap").previousElementSibling.style.display = "none";   // the "Faces" <h2>
+  $("fcwrap").style.display = "none"; $("faclab").style.display = "none";
+} else {
+  fmin.min = fmax.min = FCMIN; fmin.max = fmax.max = FCMAX;
+  fmin.value = S.fmin; fmax.value = S.fmax;
+  const updFFill = () => {
+    const span = Math.max(1, FCMAX - FCMIN);
+    $("ffill").style.left = (S.fmin - FCMIN) / span * 100 + "%";
+    $("ffill").style.right = (FCMAX - S.fmax) / span * 100 + "%";
+  };
+  fmin.oninput = e => { S.fmin = Math.min(+e.target.value, S.fmax); e.target.value = S.fmin; faceLabel(); updFFill(); render(); };
+  fmax.oninput = e => { S.fmax = Math.max(+e.target.value, S.fmin); e.target.value = S.fmax; faceLabel(); updFFill(); render(); };
+  faceLabel(); updFFill();
+}
 $("scene").value = S.scene;
 $("scene").onchange = e => { S.scene = e.target.value; render(); };
 for (const cb of document.querySelectorAll('#media input[type=checkbox]')) {
@@ -2081,6 +2124,27 @@ def cmd_serve(args) -> int:
         for r in read_face_rows(ip)
     }
 
+    # Per-photo face count (how crowded the shot is) from faces.csv, using the
+    # same size/det pre-filter as `cluster` so tiny / low-confidence detections
+    # don't inflate the count. Powers the gallery's min/max-faces slider. A photo
+    # that WAS embedded but has no face clearing the threshold counts as 0 (its
+    # only faces are too small/blurry to count) — so it drops out of "1+" filters.
+    # A photo that's not in faces.csv at all (or when faces.csv is missing) has a
+    # genuinely unknown count -> null -> always passes, like unknown-hour items.
+    # (Videos get their count from the `video` pass — see video items below.)
+    face_counts: dict[str, int] = {}
+    embedded: set[str] = set()
+    fcsv = Path(args.faces)
+    if fcsv.exists():
+        from collections import Counter
+
+        fc = Counter()
+        for r in read_face_rows(fcsv):
+            embedded.add(r["filename"])
+            if _face_size(r) >= args.min_size and float(r["det_score"]) >= args.min_det:
+                fc[r["filename"]] += 1
+        face_counts = dict(fc)
+
     # Optional scene/hour overlay — present iff a `scene` pass has been run.
     hours, scenes = {}, {}
     sp = Path(args.scene)
@@ -2130,11 +2194,21 @@ def cmd_serve(args) -> int:
     items, by_key = [], {}
     for fn, names in visible:
         it = {"k": keys[fn], "f": fn, "n": names,
+              "fc": (face_counts.get(fn, 0) if fn in embedded else None),
               "h": hours.get(fn), "s": scenes.get(fn, ""), "v": False}
         items.append(it)
         by_key[keys[fn]] = it
     for fn in video_fns:
-        it = {"k": keys[fn], "f": fn, "n": vpeople.get(fn, []), "h": None, "s": "", "v": True}
+        # Videos aren't in the face pipeline, so their "face count" is the number
+        # of distinct *named* people from the `video` pass (the only per-clip head
+        # count available). This undercounts unnamed kids vs a photo's all-faces
+        # count, but it's far better than leaving videos uncounted — that made a
+        # clip with several kids show up under a "1–2 faces" filter. A video the
+        # `video` pass never scanned has no entry -> null -> always passes.
+        names_v = vpeople.get(fn)
+        it = {"k": keys[fn], "f": fn, "n": names_v or [],
+              "fc": len(names_v) if names_v is not None else None,
+              "h": None, "s": "", "v": True}
         items.append(it)
         by_key[keys[fn]] = it
     if not items:
@@ -2206,7 +2280,8 @@ def cmd_serve(args) -> int:
 
     all_names = sorted({n for it in items for n in it["n"]})
     manifest = {"names": all_names, "liveMax": args.live_max,
-                "items": [{"k": it["k"], "n": it["n"], "h": it["h"], "s": it["s"],
+                "items": [{"k": it["k"], "n": it["n"], "fc": it["fc"],
+                           "h": it["h"], "s": it["s"],
                            "dt": it["dt"], "v": 1 if it["v"] else 0,
                            "d": round(it["d"], 1) if it["v"] else 0}
                           for it in items]}
@@ -2512,6 +2587,12 @@ def main() -> int:
     p_srv = sub.add_parser("serve", help="local web browser: name/time filters + zip export (localhost only)")
     p_srv.add_argument("--album", default="album", help="album folder (default: album/)")
     p_srv.add_argument("--image-people", default="image_people.csv", help="index from `assign`")
+    p_srv.add_argument("--faces", default="faces.csv",
+                       help="face index from `embed` — powers the face-count filter (optional)")
+    p_srv.add_argument("--min-size", type=int, default=40,
+                       help="face-count filter: min bbox side in px, matches `cluster` (default: 40)")
+    p_srv.add_argument("--min-det", type=float, default=0.5,
+                       help="face-count filter: min det_score, matches `cluster` (default: 0.5)")
     p_srv.add_argument("--scene", default="scene.csv", help="scene/hour index from `scene` (optional)")
     p_srv.add_argument("--video-people", default="video_people.csv",
                        help="per-video name index from `video` (optional)")
