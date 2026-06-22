@@ -1578,7 +1578,8 @@ function matches(it) {
     if (S.mode === "any" && has === 0) return false;
   }
   if (it.h !== null && (it.h < S.hmin || it.h > S.hmax)) return false;   // unknown hour always passes
-  if (S.scene && it.s !== S.scene) return false;
+  if (S.scene && it.s && it.s !== S.scene) return false;                 // unknown scene always passes
+
   if (!S.media[mediaCat(it)]) return false;
   return true;
 }
@@ -2089,6 +2090,23 @@ def cmd_serve(args) -> int:
             hours[r["filename"]] = int(h) if h and h.isdigit() else None
             scenes[r["filename"]] = r.get("scene") or ""
 
+    # scene.csv only covers photos, so videos would have no indoor/outdoor tag and
+    # vanish whenever a scene is selected. The album's scene is time-derived (see
+    # DESIGN.md), so reconstruct an hour -> scene map from the photos that DO have a
+    # scene and reuse it to tag videos by their capture hour — no new config, same
+    # rule. (Falls back to "unknown" for hours no photo covers; those pass the
+    # filter, just as unknown-hour items pass the time filter.)
+    hour_scene: dict[int, str] = {}
+    if scenes:
+        from collections import Counter, defaultdict
+
+        votes: dict[int, Counter] = defaultdict(Counter)
+        for fn, sc in scenes.items():
+            h = hours.get(fn)
+            if sc and h is not None:
+                votes[h][sc] += 1
+        hour_scene = {h: c.most_common(1)[0][0] for h, c in votes.items()}
+
     # Optional video-name overlay — present iff a `video` pass has been run, so
     # clips get the same name filter/caption treatment as photos.
     vpeople = {}
@@ -2163,6 +2181,9 @@ def cmd_serve(args) -> int:
                 it["h"] = int(it["dt"].split(" ")[1].split(":")[0])
             except (IndexError, ValueError):
                 pass
+        # ...then tag the video indoor/outdoor by that hour (see hour_scene above).
+        if it["v"] and not it["s"] and it["h"] is not None:
+            it["s"] = hour_scene.get(it["h"], "")
 
     # Video durations (seconds) for the grid length badge — ffprobe once, cached
     # in the same way as dates. Only videos need it.
