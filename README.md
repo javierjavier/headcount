@@ -100,7 +100,8 @@ python faces.py video --fps 2 --limit 20       # denser sampling; first 20 clips
 #    binds 127.0.0.1 only. First run builds a thumbnail cache (.serve_cache/),
 #    which is the slow part (re-decodes each HEIC); later runs reuse it.
 #    Videos in album/ also appear in the grid (play inline in the lightbox);
-#    filter to/from them with the Media dropdown, or hide them with --no-videos.
+#    toggle them with the Media checkboxes (photos/live photos/videos), or hide
+#    all videos with --no-videos.
 python faces.py serve                          # -> http://127.0.0.1:8765
 python faces.py serve --thumb 1024             # sharper previews (see note)
 python faces.py serve --no-videos              # photos only
@@ -119,8 +120,11 @@ build size and clears stale thumbs); no manual `rm -rf .serve_cache` needed.
 `.avi`, `.mkv`), discovered straight from disk — they carry no face data (the
 face pipeline still ignores them entirely; `embed`/`cluster`/`assign`/`query`
 only ever touch images). In the grid each video gets a poster-frame thumbnail
-with a ▶ badge and plays inline in the lightbox; the **Media** dropdown filters
-to photos-only or videos-only. They're included in date sorting/grouping (by
+with a ▶ play badge plus a length badge (e.g. `0:02`) and plays inline in the
+lightbox. The **Media** checkboxes toggle photos / live photos / videos
+independently (all on by default) — "live photos" are clips at or under
+`--live-max` seconds (default 3.5), which on a phone album is almost all of them.
+They're included in date sorting/grouping (by
 container `creation_time`, converted from UTC to local, falling back to file
 mtime) and the hour filter, and in zip export (always as the original file, never
 re-encoded). Use `--no-videos` to leave them out.

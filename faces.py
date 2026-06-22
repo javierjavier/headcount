@@ -1368,6 +1368,7 @@ SERVE_PAGE = """<!doctype html>
   .names label:hover { background:var(--bg); }
   .names .count { margin-left:auto; color:var(--muted); font-variant-numeric:tabular-nums; }
   .modes { display:flex; gap:14px; margin-top:8px; color:var(--muted); }
+  .modes.col { flex-direction:column; gap:6px; align-items:flex-start; }
   .modes label { display:flex; gap:5px; align-items:center; cursor:pointer; }
   /* dual-thumb range: two transparent sliders overlaid on one shared track */
   .rangewrap { position:relative; height:20px; margin:10px 8px 0; }
@@ -1408,6 +1409,10 @@ SERVE_PAGE = """<!doctype html>
   .grid .cell.vid::after { content:"\\25B6"; position:absolute; left:6px; bottom:6px;
     width:22px; height:22px; border-radius:50%; background:rgba(8,9,12,.62); color:#fff;
     font-size:9px; display:flex; align-items:center; justify-content:center; padding-left:2px; pointer-events:none; }
+  /* duration badge, bottom-right opposite the play badge (text from data-dur) */
+  .grid .cell.vid[data-dur]::before { content:attr(data-dur); position:absolute; right:6px; bottom:6px;
+    background:rgba(8,9,12,.62); color:#fff; font-size:10px; line-height:1; padding:3px 5px;
+    border-radius:4px; font-variant-numeric:tabular-nums; pointer-events:none; }
   /* slim vertical date marker sitting inline between each day's photos */
   .dhead { flex:none; width:30px; height:var(--cell); transition:height .12s ease; display:flex; align-items:center; justify-content:center;
            writing-mode:vertical-rl; text-orientation:mixed; white-space:nowrap;
@@ -1458,11 +1463,11 @@ SERVE_PAGE = """<!doctype html>
       <option value="outdoor">Outdoor</option>
     </select>
     <h2>Media</h2>
-    <select id="media">
-      <option value="">Photos &amp; videos</option>
-      <option value="photo">Photos only</option>
-      <option value="video">Videos only</option>
-    </select>
+    <div class="modes col" id="media">
+      <label><input type="checkbox" data-media="photo" checked> photos</label>
+      <label><input type="checkbox" data-media="live" checked> live photos</label>
+      <label><input type="checkbox" data-media="video" checked> videos</label>
+    </div>
     <h2>Preview size</h2>
     <input type="range" class="sizerange" id="csize" min="90" max="300" step="10">
   </aside>
@@ -1504,7 +1509,11 @@ SERVE_PAGE = """<!doctype html>
 
 <script>
 const DATA = __MANIFEST__;
-const S = { names:new Set(), mode:"all", hmin:0, hmax:23, scene:"", media:"", search:"", sort:"new", cell:150 };
+const S = { names:new Set(), mode:"all", hmin:0, hmax:23, scene:"", media:{photo:true, live:true, video:true}, search:"", sort:"new", cell:150 };
+const LIVE_MAX = DATA.liveMax || 3.5;   // videos <= this many seconds are "live photos"
+// media bucket for an item: photo / live (short clip) / video (everything else,
+// incl. clips whose duration is unknown so they're never hidden as "live").
+function mediaCat(it) { return !it.v ? "photo" : ((it.d && it.d <= LIVE_MAX) ? "live" : "video"); }
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
 // hour bounds present in the data (photos with a known hour)
@@ -1529,7 +1538,9 @@ function loadState() {
   if (typeof v.hmax === "number") S.hmax = Math.min(Math.max(v.hmax, HMIN), HMAX);
   if (S.hmin > S.hmax) { S.hmin = HMIN; S.hmax = HMAX; }
   if (v.scene === "indoor" || v.scene === "outdoor") S.scene = v.scene;
-  if (v.media === "photo" || v.media === "video") S.media = v.media;
+  if (v.media && typeof v.media === "object") {
+    for (const k of ["photo", "live", "video"]) if (typeof v.media[k] === "boolean") S.media[k] = v.media[k];
+  }
   if (v.sort === "old" || v.sort === "new") S.sort = v.sort;
   if (typeof v.cell === "number") S.cell = Math.min(Math.max(v.cell, 90), 300);
 }
@@ -1546,6 +1557,10 @@ function prettyDayShort(d) {                       // compact mm/dd/yyyy label f
   if (!d) return "Undated";
   const [y,m,day] = d.split("-");
   return m + "/" + day + "/" + y;
+}
+function fmtDur(s) {                                // seconds -> "0:02", "1:24"
+  s = Math.max(1, Math.round(s));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 }
 function prettyTime(dt) {                           // "2026:06:03 09:23:03" -> "9:23 AM"
   const t = (dt || "").split(" ")[1];
@@ -1564,8 +1579,7 @@ function matches(it) {
   }
   if (it.h !== null && (it.h < S.hmin || it.h > S.hmax)) return false;   // unknown hour always passes
   if (S.scene && it.s !== S.scene) return false;
-  if (S.media === "photo" && it.v) return false;
-  if (S.media === "video" && !it.v) return false;
+  if (!S.media[mediaCat(it)]) return false;
   return true;
 }
 
@@ -1639,6 +1653,7 @@ function render() {
     cell.title = it.n.join(", ") || (it.v ? "video" : "");
     cell.onclick = () => openLB(i);
     cell.dataset.k = it.k;
+    if (it.v && it.d) cell.dataset.dur = fmtDur(it.d);
     const img = document.createElement("img");
     img.loading = "lazy"; img.src = "/thumb/" + encodeURIComponent(it.k);
     cell.appendChild(img); frag.appendChild(cell);
@@ -1689,7 +1704,7 @@ function openLB(i) {
     const url = "/video/" + encodeURIComponent(it.k);
     const vid = $("lbvid"); vid.style.display = ""; vid.src = url; vid.play().catch(() => {});
     $("lbcap").innerHTML = "<b>" + (it.n.join(", ") || "Video") + "</b> · " + prettyDay(day) +
-      (time ? " · " + time : "") +
+      (time ? " · " + time : "") + (it.d ? " · " + fmtDur(it.d) : "") +
       ' <a href="' + url + '" target="_blank" rel="noopener">download &#8599;</a>';
   } else {
     stopVid();
@@ -1744,8 +1759,10 @@ hmin.oninput = e => { S.hmin = Math.min(+e.target.value, S.hmax); e.target.value
 hmax.oninput = e => { S.hmax = Math.max(+e.target.value, S.hmin); e.target.value = S.hmax; hourLabel(); updFill(); render(); };
 $("scene").value = S.scene;
 $("scene").onchange = e => { S.scene = e.target.value; render(); };
-$("media").value = S.media;
-$("media").onchange = e => { S.media = e.target.value; render(); };
+for (const cb of document.querySelectorAll('#media input[type=checkbox]')) {
+  cb.checked = S.media[cb.dataset.media] !== false;
+  cb.onchange = () => { S.media[cb.dataset.media] = cb.checked; render(); };
+}
 // thumbnail size is pure CSS (a custom property) — no re-render needed
 const csize = $("csize");
 csize.value = S.cell;
@@ -1855,6 +1872,26 @@ def _video_dt(path: Path) -> str:
         return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y:%m:%d %H:%M:%S")
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _video_duration(path: Path) -> float:
+    """Duration of a video in seconds (ffprobe), or 0.0 if unknown / no ffprobe.
+
+    Feeds the grid's length badge — and makes Live-Photo motion clips (≈2s) easy
+    to tell apart from real videos at a glance.
+    """
+    import json
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_entries", "format=duration", str(path)],
+            capture_output=True, text=True, timeout=20,
+        ).stdout
+        return float(json.loads(out or "{}").get("format", {}).get("duration") or 0.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 def _video_poster(path: Path):
@@ -2127,10 +2164,30 @@ def cmd_serve(args) -> int:
             except (IndexError, ValueError):
                 pass
 
+    # Video durations (seconds) for the grid length badge — ffprobe once, cached
+    # in the same way as dates. Only videos need it.
+    durs_path = cache / "durations.json"
+    durs = {}
+    if durs_path.exists():
+        try:
+            durs = json.loads(durs_path.read_text())
+        except Exception:  # noqa: BLE001
+            durs = {}
+    miss_d = [it for it in items if it["v"] and it["f"] not in durs]
+    if miss_d:
+        print(f"Reading durations for {len(miss_d)} video(s) ...")
+        with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
+            for fn, d in ex.map(lambda it: (it["f"], _video_duration(album / it["f"])), miss_d):
+                durs[fn] = d
+        durs_path.write_text(json.dumps(durs))
+    for it in items:
+        it["d"] = float(durs.get(it["f"], 0.0)) if it["v"] else 0.0
+
     all_names = sorted({n for it in items for n in it["n"]})
-    manifest = {"names": all_names,
+    manifest = {"names": all_names, "liveMax": args.live_max,
                 "items": [{"k": it["k"], "n": it["n"], "h": it["h"], "s": it["s"],
-                           "dt": it["dt"], "v": 1 if it["v"] else 0}
+                           "dt": it["dt"], "v": 1 if it["v"] else 0,
+                           "d": round(it["d"], 1) if it["v"] else 0}
                           for it in items]}
     page = SERVE_PAGE.replace("__MANIFEST__", json.dumps(manifest))
 
@@ -2445,6 +2502,9 @@ def main() -> int:
     p_srv.add_argument("--no-open", action="store_true", help="don't auto-open a browser tab")
     p_srv.add_argument("--no-videos", action="store_true",
                        help="don't surface album videos in the gallery (photos only)")
+    p_srv.add_argument("--live-max", type=float, default=3.5,
+                       help="videos this many seconds or shorter count as 'live photos' "
+                            "in the Media filter (default: 3.5)")
     p_srv.set_defaults(func=cmd_serve)
 
     args = ap.parse_args()
