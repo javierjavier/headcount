@@ -726,17 +726,6 @@ def _scene_stats(im):
     return green, sky, float(a.mean() / 255)
 
 
-def _exif_hour(path: Path) -> int:
-    """Hour-of-day from EXIF DateTime, or -1 if missing."""
-    from PIL import Image
-
-    try:
-        dt = Image.open(path).getexif().get(306, "")
-        return int(dt.split()[1].split(":")[0]) if dt else -1
-    except Exception:  # noqa: BLE001
-        return -1
-
-
 def _exif_dt(path: Path) -> str:
     """Raw EXIF capture datetime 'YYYY:MM:DD HH:MM:SS', or '' if missing.
 
@@ -749,6 +738,19 @@ def _exif_dt(path: Path) -> str:
         return Image.open(path).getexif().get(306, "") or ""
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _hour_from_dt(dt: str) -> int:
+    """Hour-of-day from an EXIF datetime 'YYYY:MM:DD HH:MM:SS', or -1."""
+    try:
+        return int(dt.split()[1].split(":")[0])
+    except (IndexError, ValueError):
+        return -1
+
+
+def _exif_hour(path: Path) -> int:
+    """Hour-of-day from EXIF DateTime, or -1 if missing."""
+    return _hour_from_dt(_exif_dt(path))
 
 
 def _parse_hours(spec: str) -> set:
@@ -857,18 +859,20 @@ def cmd_scene(args) -> int:
         w.writerow(header)
         w.writerows(final_rows)
 
-    from collections import Counter
+    from collections import Counter, defaultdict
 
     sc = Counter(s for _, s in summary)
     print(f"\n{len(summary)} images classified -> {out}{note}: "
           f"{sc.get('outdoor',0)} outdoor, {sc.get('indoor',0)} indoor")
-    rows = summary  # by-hour readout below reports on the just-classified batch
     print("\nby hour (validates against the daily schedule):")
     print(f"  {'hour':>4} {'outdoor':>8} {'indoor':>7}")
-    for hr in sorted({h for h, _ in rows if h >= 0}):
-        o = sum(1 for h, s in rows if h == hr and s == "outdoor")
-        i = sum(1 for h, s in rows if h == hr and s == "indoor")
-        print(f"  {hr:>4} {o:>8} {i:>7}")
+    by_hour: dict[int, Counter] = defaultdict(Counter)
+    for h, s in summary:  # one pass over the just-classified batch
+        if h >= 0:
+            by_hour[h][s] += 1
+    for hr in sorted(by_hour):
+        c = by_hour[hr]
+        print(f"  {hr:>4} {c.get('outdoor',0):>8} {c.get('indoor',0):>7}")
     return 0
 
 
@@ -957,9 +961,8 @@ def build_name_centroids(rows: list[dict], clusters: dict[str, int],
         if name:
             by_name[name].append(i)
     names = sorted(by_name)
-    dim = mat.shape[1] if mat.ndim == 2 and mat.shape[0] else EMB_DIM
     if not names:
-        return [], np.zeros((0, dim), dtype=np.float32)
+        return [], np.zeros((0, EMB_DIM), dtype=np.float32)
     cents = np.vstack([mat[by_name[nm]].mean(0) for nm in names]).astype(np.float32)
     cents /= np.linalg.norm(cents, axis=1, keepdims=True)
     return names, cents
@@ -2103,6 +2106,18 @@ def _build_thumbs(items, album, cache, size, workers):
     print(f"  done ({len(todo)} built).")
 
 
+def _load_json_cache(path: Path) -> dict:
+    """Read a JSON dict sidecar from the thumb cache, or {} if missing/corrupt."""
+    import json
+
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except Exception:  # noqa: BLE001
+            return {}
+    return {}
+
+
 def cmd_serve(args) -> int:
     import http.server
     import io
@@ -2136,14 +2151,12 @@ def cmd_serve(args) -> int:
     # unknown count -> null -> always passes, like unknown-hour items. (Videos get
     # their count from the `video` pass — see video items below.)
     face_counts: dict[str, int] = {}
-    embedded: set[str] = set()
     fcsv = Path(args.faces)
     if fcsv.exists():
         from collections import Counter
 
         fc = Counter()
         for r in read_face_rows(fcsv):
-            embedded.add(r["filename"])
             fc[r["filename"]] += 1
         face_counts = dict(fc)
 
@@ -2196,7 +2209,7 @@ def cmd_serve(args) -> int:
     items, by_key = [], {}
     for fn, names in visible:
         it = {"k": keys[fn], "f": fn, "n": names,
-              "fc": (face_counts.get(fn, 0) if fn in embedded else None),
+              "fc": face_counts.get(fn),  # None when not in faces.csv -> unknown count
               "h": hours.get(fn), "s": scenes.get(fn, ""), "v": False}
         items.append(it)
         by_key[keys[fn]] = it
@@ -2230,12 +2243,7 @@ def cmd_serve(args) -> int:
     # photo each launch is slow, so cache filename -> datetime in the thumb cache
     # and only extract ones we haven't recorded yet.
     dates_path = cache / "dates.json"
-    dates = {}
-    if dates_path.exists():
-        try:
-            dates = json.loads(dates_path.read_text())
-        except Exception:  # noqa: BLE001
-            dates = {}
+    dates = _load_json_cache(dates_path)
     missing = [it for it in items if it["f"] not in dates]
     if missing:
         print(f"Reading capture dates for {len(missing)} item(s) ...")
@@ -2253,10 +2261,9 @@ def cmd_serve(args) -> int:
         # Videos have no scene.csv hour; derive it from the capture time so the
         # time-of-day filter applies to them just like photos.
         if it["v"] and it["dt"]:
-            try:
-                it["h"] = int(it["dt"].split(" ")[1].split(":")[0])
-            except (IndexError, ValueError):
-                pass
+            h = _hour_from_dt(it["dt"])
+            if h >= 0:
+                it["h"] = h
         # ...then tag the video indoor/outdoor by that hour (see hour_scene above).
         if it["v"] and not it["s"] and it["h"] is not None:
             it["s"] = hour_scene.get(it["h"], "")
@@ -2264,12 +2271,7 @@ def cmd_serve(args) -> int:
     # Video durations (seconds) for the grid length badge — ffprobe once, cached
     # in the same way as dates. Only videos need it.
     durs_path = cache / "durations.json"
-    durs = {}
-    if durs_path.exists():
-        try:
-            durs = json.loads(durs_path.read_text())
-        except Exception:  # noqa: BLE001
-            durs = {}
+    durs = _load_json_cache(durs_path)
     miss_d = [it for it in items if it["v"] and it["f"] not in durs]
     if miss_d:
         print(f"Reading durations for {len(miss_d)} video(s) ...")
