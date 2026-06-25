@@ -1225,6 +1225,39 @@ def _query_match(names: set, want: set, any_of: set, without: set, only: set) ->
     return True
 
 
+def _export_one(src: Path, fn: str, dstdir: Path, args) -> None:
+    """Materialize one source image into *dstdir* per the query's output mode.
+
+    Flatten subfolder-relative names to a basename and dedup basename clashes so
+    neither is shadowed. Raises on failure; the caller logs and continues.
+    """
+    from common import _unique_path
+
+    dstdir.mkdir(parents=True, exist_ok=True)
+    if args.jpeg:
+        # Re-encode to JPEG. macOS Finder thumbnails HEIC unreliably (its icon
+        # service bails on many of these files even though Quick Look can decode
+        # them); JPEG always thumbnails. Open WITHOUT exif_transpose so the
+        # original pixels + orientation tag stay together, and copy EXIF verbatim
+        # unless stripped.
+        from PIL import Image
+
+        dst = _unique_path(dstdir / f"{Path(fn).stem}.jpg")
+        img: Image.Image = Image.open(src)
+        exif = None if args.strip_exif else img.info.get("exif")
+        img = img.convert("RGB")
+        if args.max_size:
+            img.thumbnail((args.max_size, args.max_size))
+        save_kw = {"quality": args.jpeg_quality}
+        if exif:
+            save_kw["exif"] = exif
+        img.save(dst, "JPEG", **save_kw)
+    elif args.copy:
+        shutil.copy2(src, _unique_path(dstdir / Path(fn).name))
+    else:
+        (_unique_path(dstdir / Path(fn).name)).symlink_to(src)
+
+
 def cmd_query(args) -> int:
     ip = Path(args.image_people)
     if not ip.exists():
@@ -1243,19 +1276,45 @@ def cmd_query(args) -> int:
         print("Give at least one of --with / --any / --only.", file=sys.stderr)
         return 1
 
-    # Optional indoor/outdoor filter from a `scene` pass.
-    where_ok = None
-    if args.where:
+    # Optional indoor/outdoor data from a `scene` pass — drives both --where
+    # (filter to one scene) and --split-scene (fan into indoor/outdoor subfolders).
+    if args.where and args.split_scene:
+        print("Use either --where or --split-scene, not both.", file=sys.stderr)
+        return 1
+    scene_of = None
+    if args.where or args.split_scene:
         scene_path = Path(args.scene)
         if not scene_path.exists():
-            print(f"{scene_path} not found — run `scene` first (or drop --where).", file=sys.stderr)
+            print(f"{scene_path} not found — run `scene` first (or drop --where/--split-scene).",
+                  file=sys.stderr)
             return 1
-        where_ok = {r["filename"] for r in read_face_rows(scene_path) if r["scene"] == args.where}
+        scene_of = {r["filename"]: r["scene"] for r in read_face_rows(scene_path)}
+    where_ok = {fn for fn, sc in scene_of.items() if sc == args.where} if args.where else None
 
-    selected = sorted(
+    name_matched = [
         fn for fn, names in data.items()
         if _query_match(names, want, any_of, without, only)
-        and (where_ok is None or fn in where_ok)
+    ]
+    # Guard against a stale scene.csv. If a scene split/filter is requested but
+    # some matched photos aren't in it (typically a new import that `scene` hasn't
+    # processed yet), refuse loudly rather than quietly dropping them (--where) or
+    # dumping them in unscored/ (--split-scene). --allow-unscored opts into that
+    # soft path knowingly.
+    if scene_of is not None and not args.allow_unscored:
+        missing = [fn for fn in name_matched if fn not in scene_of]
+        if missing:
+            print(f"{len(missing)} of {len(name_matched)} matched photo(s) are missing from "
+                  f"{scene_path} — it is stale. Re-run `scene`, or pass --allow-unscored.",
+                  file=sys.stderr)
+            for fn in missing[:5]:
+                print(f"  {fn}", file=sys.stderr)
+            if len(missing) > 5:
+                print(f"  ... (+{len(missing) - 5} more)", file=sys.stderr)
+            return 1
+
+    selected = sorted(
+        fn for fn in name_matched
+        if where_ok is None or fn in where_ok
     )
 
     # Human-readable folder name for the query.
@@ -1299,43 +1358,46 @@ def cmd_query(args) -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     album = Path(args.album)
-    from common import _unique_path
 
     n = 0
+    unscored = 0
     for fn in selected:
         src = (album / fn).resolve()
         if not src.exists():
             continue
-        # Flatten subfolder-relative names to a basename in the output dir, and
-        # dedup basename clashes between subfolders so neither is shadowed.
+        if args.split_scene:
+            # Route into out/<scene>/. Reachable with a missing scene row only
+            # under --allow-unscored (the pre-flight check aborts otherwise);
+            # those land in out/unscored/ rather than vanish.
+            sub = scene_of.get(fn)
+            unscored += sub is None
+            dstdir = out / (sub or "unscored")
+        else:
+            dstdir = out
         try:
-            if args.jpeg:
-                # Re-encode to JPEG. macOS Finder thumbnails HEIC unreliably
-                # (its icon service bails on many of these files even though
-                # Quick Look can decode them); JPEG always thumbnails. Open
-                # WITHOUT exif_transpose so the original pixels + orientation tag
-                # stay together, and copy EXIF verbatim unless stripped.
-                from PIL import Image
-
-                dst = _unique_path(out / f"{Path(fn).stem}.jpg")
-                img: Image.Image = Image.open(src)
-                exif = None if args.strip_exif else img.info.get("exif")
-                img = img.convert("RGB")
-                if args.max_size:
-                    img.thumbnail((args.max_size, args.max_size))
-                save_kw = {"quality": args.jpeg_quality}
-                if exif:
-                    save_kw["exif"] = exif
-                img.save(dst, "JPEG", **save_kw)
-            elif args.copy:
-                shutil.copy2(src, _unique_path(out / Path(fn).name))
-            else:
-                (_unique_path(out / Path(fn).name)).symlink_to(src)
+            _export_one(src, fn, dstdir, args)
             n += 1
         except Exception as e:  # noqa: BLE001 - one bad file shouldn't abort the query
             print(f"  ! {fn}: {e}")
     kind = "jpegs" if args.jpeg else ("copies" if args.copy else "symlinks")
     print(f"Wrote {n} {kind} -> {out}/")
+    if unscored:
+        print(f"  ({unscored} had no scene tag -> {out}/unscored/)")
+
+    if args.zip:
+        import zipfile
+
+        # Pack the materialized folder into a sibling <label>.zip, preserving the
+        # split-scene subfolders. is_file() follows symlinks, so symlinked results
+        # are stored as real content -- a zip is self-contained by definition.
+        zpath = out.with_name(out.name + ".zip")
+        if zpath.exists():
+            zpath.unlink()
+        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in sorted(out.rglob("*")):
+                if p.is_file():
+                    zf.write(p, p.relative_to(out.parent))
+        print(f"Zipped -> {zpath}")
     return 0
 
 
@@ -2547,6 +2609,13 @@ def main() -> int:
     p_qry.add_argument("--only", default="", help="exactly this set present")
     p_qry.add_argument("--where", choices=["indoor", "outdoor"], default="",
                        help="restrict to indoor/outdoor (needs a `scene` pass)")
+    p_qry.add_argument("--split-scene", action="store_true",
+                       help="fan matches into indoor/ and outdoor/ subfolders (needs a `scene` "
+                            "pass; mutually exclusive with --where)")
+    p_qry.add_argument("--allow-unscored", action="store_true",
+                       help="with --where/--split-scene, proceed even if scene.csv is missing some "
+                            "matches (else the query aborts on a stale scene.csv); untagged photos "
+                            "go to unscored/")
     p_qry.add_argument("--scene", default="scene.csv", help="scene index from `scene`")
     p_qry.add_argument("--out", default="query", help="output base folder (default: query/)")
     p_qry.add_argument("--copy", action="store_true", help="real HEIC copies instead of symlinks")
@@ -2557,6 +2626,8 @@ def main() -> int:
     p_qry.add_argument("--jpeg-quality", type=int, default=90, help="with --jpeg, JPEG quality (default: 90)")
     p_qry.add_argument("--strip-exif", action="store_true",
                        help="with --jpeg, drop EXIF (incl. GPS); default preserves it")
+    p_qry.add_argument("--zip", action="store_true",
+                       help="also pack the result folder into <out>/<label>.zip")
     p_qry.add_argument("--dry-run", action="store_true", help="list matches, don't write files")
     p_qry.set_defaults(func=cmd_query)
 
