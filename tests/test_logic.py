@@ -182,6 +182,69 @@ def test_read_done_manifest(tmp_path):
     assert faces.read_done_manifest(m) == {"A.HEIC", "B.HEIC"}
 
 
+def test_file_hash_matches_byte_identical_only(tmp_path):
+    # Same bytes -> same hash (a re-shared copy under another name); one differing
+    # byte -> different hash (the guard must not fold genuinely distinct photos).
+    a, b, c = tmp_path / "a.heic", tmp_path / "b.heic", tmp_path / "c.heic"
+    a.write_bytes(b"\x00IMGDATA\xff" * 100)
+    b.write_bytes(b"\x00IMGDATA\xff" * 100)
+    c.write_bytes(b"\x00IMGDATA\xff" * 100 + b"x")
+    assert faces._file_hash(a) == faces._file_hash(b)
+    assert faces._file_hash(a) != faces._file_hash(c)
+
+
+def test_hash_manifest_roundtrip(tmp_path):
+    m = tmp_path / "faces.hashes"
+    assert faces.read_hash_manifest(m) == {}
+    with m.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["sub/IMG_1.HEIC", "abc123"])
+        w.writerow(["IMG_2.HEIC", "def456"])
+    assert faces.read_hash_manifest(m) == {"sub/IMG_1.HEIC": "abc123", "IMG_2.HEIC": "def456"}
+
+
+def test_embed_dedup_skips_byte_identical(tmp_path):
+    # A photo re-shared under a second subfolder (byte-identical) must be
+    # embedded once: recorded as processed but not given a second hash entry,
+    # while a genuinely new image still goes through. Stubs out decode + model
+    # so the guard's bookkeeping is what's under test, not insightface.
+    import argparse
+
+    album = tmp_path / "album"
+    (album / "20260618").mkdir(parents=True)
+    (album / "20260628").mkdir(parents=True)
+    dup = b"\x00DUP\xff" * 50
+    (album / "20260618" / "IMG_1.HEIC").write_bytes(dup)          # canonical (sorts first)
+    (album / "20260628" / "IMG_1.HEIC").write_bytes(dup)          # byte-identical re-share
+    (album / "20260628" / "IMG_2.HEIC").write_bytes(b"\x00NEW\xff" * 50)
+
+    faces_csv = tmp_path / "faces.csv"
+    args = argparse.Namespace(album=str(album), faces=str(faces_csv),
+                              det_size=1024, det_thresh=0.4, prefetch=0,
+                              limit=0, no_dedup=False)
+
+    class _StubApp:
+        def get(self, _img):
+            return []
+
+    orig_decode, orig_build = faces._decode, faces.build_face_app
+    faces._decode = lambda _p: object()             # skip real HEIC decode
+    faces.build_face_app = lambda **_k: _StubApp()   # skip model load
+    try:
+        rc = faces.cmd_embed(args)
+    finally:
+        faces._decode, faces.build_face_app = orig_decode, orig_build
+
+    assert rc == 0
+    done = faces.read_done_manifest(faces_csv.with_suffix(".done"))
+    hashes = faces.read_hash_manifest(faces_csv.with_suffix(".hashes"))
+    # all three are marked processed (the dup too, so it isn't re-checked)...
+    assert done == {"20260618/IMG_1.HEIC", "20260628/IMG_1.HEIC", "20260628/IMG_2.HEIC"}
+    # ...but only the two unique-content images carry a hash entry
+    assert set(hashes) == {"20260618/IMG_1.HEIC", "20260628/IMG_2.HEIC"}
+    assert hashes["20260618/IMG_1.HEIC"] == faces._file_hash(album / "20260628" / "IMG_1.HEIC")
+
+
 def test_resume_union_skips_zero_face_images(tmp_path):
     # faces.csv lists only face-bearing images; the manifest also covers the
     # zero-face one. The union is what makes a re-run skip everything.

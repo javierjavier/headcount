@@ -105,6 +105,36 @@ def read_done_manifest(done_path: Path) -> set[str]:
     return done
 
 
+def _file_hash(path: Path) -> str:
+    """Content hash (md5 hex) of a file's raw bytes, read in chunks.
+
+    Used to skip re-embedding byte-identical photos that arrive under a second
+    path — the common case when several teachers re-share an overlapping batch
+    (`embed` otherwise keys only on the album-relative path, so the same image
+    in two subfolders is embedded twice). This catches *byte-identical* copies,
+    not visually-equal re-encodes (those decode differently and would need a
+    perceptual hash); raw bytes are cheap (no decode) and cover the re-upload
+    case we actually see. md5 is for dedup, not security.
+    """
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read_hash_manifest(path: Path) -> dict[str, str]:
+    """Read the `faces.hashes` sidecar as {album-relative filename: content hash}."""
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    with path.open(newline="") as f:
+        for row in csv.reader(f):
+            if len(row) == 2:
+                out[row[0]] = row[1]
+    return out
+
+
 def _next_face_id(csv_path: Path) -> int:
     """Largest face_id in *csv_path* + 1, so a resumed run keeps numbering."""
     last = -1
@@ -247,6 +277,7 @@ def cmd_embed(args) -> int:
     faces_csv = Path(args.faces)
     emb_path = faces_csv.with_suffix(".emb")
     done_path = faces_csv.with_suffix(".done")
+    hash_path = faces_csv.with_suffix(".hashes")
 
     # Repair a desynced csv/emb pair (e.g. a kill between the two writes) by
     # trimming to the last consistent image, instead of forcing a full --rescan.
@@ -262,8 +293,62 @@ def cmd_embed(args) -> int:
         todo = todo[: args.limit]
 
     print(f"{len(images)} images, {len(done)} already embedded, {len(todo)} to embed.")
+
+    # Content-dedup: skip a to-embed image whose raw bytes match one already
+    # embedded (or an earlier image this run). `embed` keys only on the album
+    # path, so the same photo re-shared under a second subfolder would otherwise
+    # be embedded — and clustered/shown/exported — twice. We persist a
+    # filename->hash sidecar so this stays incremental; the first guarded run
+    # over an existing album back-fills hashes for what's already embedded (a
+    # one-time read), after which only new images are hashed. --no-dedup skips
+    # the whole thing. See _file_hash for what "duplicate" means (byte-identical).
+    seen_hash: dict[str, str] = {}
+    hash_of: dict[str, str] = {}
+    dups: list[tuple[str, str]] = []   # (duplicate key, canonical key it matches)
+    if not args.no_dedup and todo:
+        key_to_path = {rel_key(p, album): p for p in images}
+        recorded = read_hash_manifest(hash_path)
+        backfill = [k for k in done if k not in recorded and k in key_to_path]
+        if backfill:
+            print(f"Indexing content hashes for {len(backfill)} already-embedded "
+                  f"image(s) (one-time, enables dedup) ...")
+            with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
+                for k, hh in zip(backfill, ex.map(lambda k: _file_hash(key_to_path[k]), backfill)):
+                    recorded[k] = hh
+            with hash_path.open("a", newline="") as hf:
+                w = csv.writer(hf)
+                for k in backfill:
+                    w.writerow([k, recorded[k]])
+        for k, hh in recorded.items():
+            seen_hash.setdefault(hh, k)   # first key wins as the canonical copy
+
+        kept = []
+        with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
+            todo_keys = [rel_key(p, album) for p in todo]
+            for p, key, hh in zip(todo, todo_keys, ex.map(_file_hash, todo)):
+                canon = seen_hash.get(hh)
+                if canon is not None:
+                    dups.append((key, canon))
+                else:
+                    seen_hash[hh] = key
+                    hash_of[key] = hh
+                    kept.append(p)
+        if dups:
+            print(f"Skipping {len(dups)} byte-identical duplicate(s); "
+                  f"{len(kept)} unique image(s) to embed.")
+            for dk, ck in dups[:10]:
+                print(f"  dup: {dk}  ==  {ck}")
+            if len(dups) > 10:
+                print(f"  ... and {len(dups) - 10} more")
+        todo = kept
+
     if not todo:
         print("Nothing to do. (Use --rescan to start over.)")
+        # Still record any duplicates as processed so they aren't re-hashed next run.
+        if dups:
+            with done_path.open("a") as df:
+                for dk, _ in dups:
+                    df.write(dk + "\n")
         _finalize_npy(emb_path, faces_csv)
         return 0
 
@@ -290,10 +375,17 @@ def cmd_embed(args) -> int:
     # double-counted (it's already in faces.csv, which the resume union also
     # consults), while zero-face images still get marked processed.
     with faces_csv.open("a", newline="") as cf, emb_path.open("ab") as ef, \
-            done_path.open("a") as df:
+            done_path.open("a") as df, hash_path.open("a", newline="") as hf:
         writer = csv.writer(cf)
+        hash_writer = csv.writer(hf)
         if new_csv:
             writer.writerow(FACES_HEADER)
+        # Record skipped duplicates as processed up front so a crash mid-run
+        # doesn't leave them to be re-hashed (their bytes are already embedded
+        # under the canonical key).
+        for dk, _ in dups:
+            df.write(dk + "\n")
+        df.flush()
         for path, decoded in stream:
             if isinstance(decoded, Exception):
                 print(f"\n  ! {path.name}: {decoded}")
@@ -318,6 +410,9 @@ def cmd_embed(args) -> int:
             ef.flush()
             df.write(key + "\n")
             df.flush()
+            if key in hash_of:                 # persist this image's content hash
+                hash_writer.writerow([key, hash_of[key]])
+                hf.flush()
 
     print(f"\nEmbedded {n_faces} face(s) from {len(todo)} image(s) -> {faces_csv}")
     _finalize_npy(emb_path, faces_csv)
@@ -2603,6 +2698,8 @@ def main() -> int:
     p_emb.add_argument("--prefetch", type=int, default=2,
                        help="background HEIC-decode threads to overlap with inference (~1.5x; 0=serial)")
     p_emb.add_argument("--limit", type=int, default=0, help="only embed first N images (for testing)")
+    p_emb.add_argument("--no-dedup", action="store_true",
+                       help="embed every image even if byte-identical to one already embedded")
     p_emb.add_argument("--rescan", action="store_true", help="ignore existing faces.csv and start over")
     p_emb.set_defaults(func=cmd_embed)
 
@@ -2756,6 +2853,7 @@ def main() -> int:
         faces_csv.with_suffix(".emb").unlink(missing_ok=True)
         faces_csv.with_suffix(".npy").unlink(missing_ok=True)
         faces_csv.with_suffix(".done").unlink(missing_ok=True)
+        faces_csv.with_suffix(".hashes").unlink(missing_ok=True)
 
     return args.func(args)
 
