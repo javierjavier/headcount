@@ -1427,6 +1427,10 @@ SERVE_PAGE = """<!doctype html>
   main { flex:1; overflow-y:auto; padding:16px 20px; }
   h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:20px 0 8px; }
   h2:first-child { margin-top:0; }
+  h2.toggle { cursor:pointer; user-select:none; display:flex; align-items:center; gap:6px; }
+  h2.toggle::before { content:"\\25be"; font-size:11px; transition:transform .12s; }   /* ▾ */
+  h2.toggle.closed::before { transform:rotate(-90deg); }                                /* ▸ when collapsed */
+  h2.toggle.closed + * { display:none !important; }
   input[type=search], select { width:100%; padding:7px 9px; background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:7px; }
   .names { max-height:38vh; overflow-y:auto; border:1px solid var(--line); border-radius:7px; padding:6px; margin-top:8px; }
   .names label { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:5px; cursor:pointer; }
@@ -1547,6 +1551,8 @@ SERVE_PAGE = """<!doctype html>
       <label><input type="checkbox" data-media="live" checked> live photos</label>
       <label><input type="checkbox" data-media="video" checked> videos</label>
     </div>
+    <h2 id="foldhead" class="toggle closed">Folder</h2>
+    <div class="names" id="folders"></div>
     <h2>Preview size</h2>
     <input type="range" class="sizerange" id="csize" min="90" max="300" step="10">
   </aside>
@@ -1588,7 +1594,11 @@ SERVE_PAGE = """<!doctype html>
 
 <script>
 const DATA = __MANIFEST__;
-const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, scene:"", media:{photo:true, live:true, video:true}, search:"", sort:"new", nsort:"az", cell:150 };
+const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, scene:"", media:{photo:true, live:true, video:true}, foldersOff:new Set(), foldOpen:false, search:"", sort:"new", nsort:"az", cell:150 };
+// album subfolders present in the data (""=album root). Stored as an *exclude*
+// set so the default (nothing excluded) shows everything and a freshly imported
+// subfolder is visible without clearing saved filters.
+const FOLDERS = DATA.folders || [];
 const LIVE_MAX = DATA.liveMax || 3.5;   // videos <= this many seconds are "live photos"
 // media bucket for an item: photo / live (short clip) / video (everything else,
 // incl. clips whose duration is unknown so they're never hidden as "live").
@@ -1610,7 +1620,7 @@ S.fmin = FCMIN; S.fmax = FCMAX;
 const SKEY = "headcount.filters.v1";
 function saveState() {
   try { localStorage.setItem(SKEY, JSON.stringify({
-    names:[...S.names], mode:S.mode, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, scene:S.scene, media:S.media, sort:S.sort, nsort:S.nsort, cell:S.cell
+    names:[...S.names], mode:S.mode, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, scene:S.scene, media:S.media, foldersOff:[...S.foldersOff], foldOpen:S.foldOpen, sort:S.sort, nsort:S.nsort, cell:S.cell
   })); } catch (e) {}
 }
 function loadState() {
@@ -1629,6 +1639,11 @@ function loadState() {
   if (v.media && typeof v.media === "object") {
     for (const k of ["photo", "live", "video"]) if (typeof v.media[k] === "boolean") S.media[k] = v.media[k];
   }
+  if (Array.isArray(v.foldersOff)) {                              // drop folders absent from this album
+    const kf = new Set(FOLDERS);
+    S.foldersOff = new Set(v.foldersOff.filter(f => kf.has(f)));
+  }
+  if (typeof v.foldOpen === "boolean") S.foldOpen = v.foldOpen;
   if (v.sort === "old" || v.sort === "new") S.sort = v.sort;
   if (["az","za","hi","lo"].includes(v.nsort)) S.nsort = v.nsort;
   if (typeof v.cell === "number") S.cell = Math.min(Math.max(v.cell, 90), 300);
@@ -1671,6 +1686,7 @@ function matches(it) {
   if (S.scene && it.s && it.s !== S.scene) return false;                 // unknown scene always passes
 
   if (!S.media[mediaCat(it)]) return false;
+  if (S.foldersOff.has(it.sf)) return false;                            // deselected subfolder
   return true;
 }
 
@@ -1788,6 +1804,23 @@ function buildNames() {
   }
 }
 
+const folderLabel = f => f === "" ? "album root" : f;
+function buildFolders() {
+  const box = $("folders"); box.innerHTML = "";
+  const counts = {};
+  for (const f of FOLDERS) counts[f] = 0;
+  for (const it of DATA.items) counts[it.sf] = (counts[it.sf] || 0) + 1;
+  for (const f of FOLDERS) {
+    const lab = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = !S.foldersOff.has(f);
+    cb.onchange = () => { cb.checked ? S.foldersOff.delete(f) : S.foldersOff.add(f); render(); };
+    const span = document.createElement("span"); span.textContent = folderLabel(f);
+    const c = document.createElement("span"); c.className = "count"; c.textContent = counts[f];
+    lab.append(cb, span, c); box.appendChild(lab);
+  }
+}
+
 // --- lightbox: show the (already-loaded) thumbnail instantly, swap in the
 // 2048px render when it arrives; clicking the image opens the original. ---
 let lbi = -1;
@@ -1887,6 +1920,19 @@ for (const cb of document.querySelectorAll('#media input[type=checkbox]')) {
   cb.checked = S.media[cb.dataset.media] !== false;
   cb.onchange = () => { S.media[cb.dataset.media] = cb.checked; render(); };
 }
+// One folder (or none) means nothing to filter on — hide the section, like Faces.
+// Otherwise it's a collapsible section (CSS hides the list while .closed is set).
+const foldhead = $("foldhead");
+if (FOLDERS.length < 2) {
+  foldhead.style.display = "none"; $("folders").style.display = "none";
+} else {
+  foldhead.classList.toggle("closed", !S.foldOpen);   // reflect restored open/closed state
+  foldhead.onclick = () => {
+    S.foldOpen = !S.foldOpen;
+    foldhead.classList.toggle("closed", !S.foldOpen);
+    saveState();
+  };
+}
 // thumbnail size is pure CSS (a custom property) — no re-render needed
 const csize = $("csize");
 csize.value = S.cell;
@@ -1914,7 +1960,7 @@ $("export").onclick = async () => {
   finally { btn.textContent = was; btn.disabled = current.length === 0; }
 };
 
-buildNames(); hourLabel(); updFill(); render();
+buildNames(); buildFolders(); hourLabel(); updFill(); render();
 </script>
 </body>
 </html>"""
@@ -2360,9 +2406,16 @@ def cmd_serve(args) -> int:
         it["d"] = float(durs.get(it["f"], 0.0)) if it["v"] else 0.0
 
     all_names = sorted({n for it in items for n in it["n"]})
-    manifest = {"names": all_names, "liveMax": args.live_max,
+    # Album-relative parent dir of each item (POSIX, see rel_key) — drives the
+    # gallery's per-subfolder filter. Files sitting directly in album/ have no
+    # subfolder; "" groups them together (labelled "album root" client-side).
+    def _subfolder(fn: str) -> str:
+        return fn.rsplit("/", 1)[0] if "/" in fn else ""
+
+    all_folders = sorted({_subfolder(it["f"]) for it in items})
+    manifest = {"names": all_names, "folders": all_folders, "liveMax": args.live_max,
                 "items": [{"k": it["k"], "n": it["n"], "fc": it["fc"],
-                           "h": it["h"], "s": it["s"],
+                           "h": it["h"], "s": it["s"], "sf": _subfolder(it["f"]),
                            "dt": it["dt"], "v": 1 if it["v"] else 0,
                            "d": round(it["d"], 1) if it["v"] else 0}
                           for it in items]}
