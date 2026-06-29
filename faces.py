@@ -1563,6 +1563,10 @@ SERVE_PAGE = """<!doctype html>
   .bar .spacer { flex:1; }
   button { background:var(--accent); color:#fff; border:0; padding:8px 16px; border-radius:7px; font-weight:600; cursor:pointer; }
   button:disabled { opacity:.4; cursor:default; }
+  /* sidebar global reset: ghost button, dim until some filter is active */
+  .reset { width:100%; margin-bottom:6px; background:none; color:var(--muted); border:1px solid var(--line); padding:8px 12px; font-weight:500; }
+  .reset:hover:not(:disabled) { color:var(--ink); border-color:var(--accent); }
+  .reset:disabled { opacity:.45; cursor:default; }
   .ctl { display:flex; align-items:center; gap:8px; color:var(--muted); }
   .ctl select { width:auto; }
   .grid { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-start; }
@@ -1582,7 +1586,7 @@ SERVE_PAGE = """<!doctype html>
            writing-mode:vertical-rl; text-orientation:mixed; white-space:nowrap;
            font-size:11px; font-weight:600; color:var(--muted); letter-spacing:.02em;
            border-left:2px solid var(--line); cursor:pointer; user-select:none; }
-  .dhead:hover { color:var(--text); border-left-color:var(--accent); }
+  .dhead:hover { color:var(--ink); border-left-color:var(--accent); }
   /* collapsed day: a full-width horizontal bar standing in for the hidden run of cells */
   .dhead.collapsed { width:100%; flex-basis:100%; height:auto; writing-mode:horizontal-tb;
                      justify-content:flex-start; gap:6px; padding:7px 10px; background:var(--panel);
@@ -1612,6 +1616,7 @@ SERVE_PAGE = """<!doctype html>
 <body>
 <div class="wrap">
   <aside>
+    <button id="reset" class="reset" title="Clear every filter and view setting back to default" disabled>Reset all filters</button>
     <h2>Names</h2>
     <input type="search" id="nsearch" placeholder="filter names…" autocomplete="off">
     <div class="modes">
@@ -1854,10 +1859,36 @@ function renderActive() {
   box.appendChild(clr);
 }
 
+// true when anything narrows the view from its default (drives the Reset button's
+// enabled state). Display prefs (sort, preview size, name-list order) don't count.
+function filtersActive() {
+  return S.names.size > 0
+    || S.fmin !== FCMIN || S.fmax !== FCMAX
+    || S.hmin !== HMIN || S.hmax !== HMAX
+    || S.dmin !== DMIN || S.dmax !== DMAX
+    || S.scene !== ""
+    || !S.media.photo || !S.media.live || !S.media.video
+    || S.foldersOff.size > 0 || S.collapsedDays.size > 0;
+}
+
+// clear every filter + view-narrowing setting, then reload so each widget re-inits
+// from the cleared state (cheaper and far less error-prone than re-syncing ~12 controls).
+function resetFilters() {
+  S.names = new Set(); S.mode = "all"; S.search = "";
+  S.fmin = FCMIN; S.fmax = FCMAX;
+  S.hmin = HMIN; S.hmax = HMAX;
+  S.dmin = DMIN; S.dmax = DMAX;
+  S.scene = ""; S.media = { photo:true, live:true, video:true };
+  S.foldersOff = new Set(); S.collapsedDays = new Set();
+  saveState();
+  location.reload();
+}
+
 let current = [];
 function render() {
   saveState();
   renderActive();
+  $("reset").disabled = !filtersActive();
   current = DATA.items.filter(matches);
   current.sort((a,b) => {
     const x = a.dt || "", y = b.dt || "";
@@ -2024,6 +2055,7 @@ document.addEventListener("keydown", e => {
   else if (e.key === "ArrowRight") navLB(1);
 });
 
+$("reset").onclick = resetFilters;
 $("nsearch").oninput = e => { S.search = e.target.value.trim().toLowerCase(); buildNames(); };
 $("nsort").value = S.nsort;
 $("nsort").onchange = e => { S.nsort = e.target.value; buildNames(); saveState(); };
