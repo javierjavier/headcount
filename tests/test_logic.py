@@ -548,6 +548,47 @@ def test_merge_scene_rows_new_wins_and_sorts():
     assert merged[1] == ["b.heic", "9", "", "", "", "indoor"]            # untouched
 
 
+def _write_overrides(path: Path, rows: list) -> None:
+    with path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["subdir", "scene"])
+        w.writerows(rows)
+
+
+def test_scene_overrides_missing_file_is_empty(tmp_path):
+    assert faces._load_scene_overrides(tmp_path / "nope.csv") == []
+
+
+def test_scene_override_matches_prefix_not_substring(tmp_path):
+    p = tmp_path / "ov.csv"
+    _write_overrides(p, [["20260101/event-a", "outdoor"]])
+    ov = faces._load_scene_overrides(p)
+    # photo under the folder is forced...
+    assert faces._override_scene("20260101/event-a/DSC1.jpg", ov) == "outdoor"
+    # ...but a sibling whose name merely starts with the same string is not: the
+    # trailing "/" stops "event-a" from matching "event-annex".
+    assert faces._override_scene("20260101/event-annex/IMG.jpg", ov) == ""
+    assert faces._override_scene("20260202/IMG.jpg", ov) == ""
+
+
+def test_scene_override_longest_prefix_wins(tmp_path):
+    p = tmp_path / "ov.csv"
+    _write_overrides(p, [["grad", "outdoor"], ["grad/indoor_ceremony", "indoor"]])
+    ov = faces._load_scene_overrides(p)
+    assert faces._override_scene("grad/field/IMG.jpg", ov) == "outdoor"
+    assert faces._override_scene("grad/indoor_ceremony/IMG.jpg", ov) == "indoor"
+
+
+def test_scene_overrides_skips_blank_and_bad_scene(tmp_path):
+    p = tmp_path / "ov.csv"
+    _write_overrides(p, [["", "outdoor"],          # no subdir
+                         ["grad", ""],             # no scene
+                         ["grad", "sideways"],     # not indoor/outdoor
+                         ["good", "Outdoor"]])      # case-insensitive, kept
+    ov = faces._load_scene_overrides(p)
+    assert ov == [("good/", "outdoor")]
+
+
 # --- standalone runner (no pytest) -----------------------------------------
 
 def _run_standalone() -> int:

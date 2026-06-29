@@ -874,6 +874,41 @@ def merge_scene_rows(existing: list[list[str]], new: list[list[str]]) -> list[li
     return [by_fn[k] for k in sorted(by_fn)]
 
 
+def _load_scene_overrides(path: Path) -> list:
+    """Read scene_overrides.csv -> [(prefix, scene), ...], longest prefix first.
+
+    Each row (subdir,scene) forces every photo under album/<subdir>/ to a fixed
+    indoor/outdoor value. Applied AFTER the time/green classification on *every*
+    scene run, so a folder whose schedule doesn't match the global --outdoor-hours
+    window (e.g. an all-outdoor graduation shot at 4pm) keeps its tag across full
+    re-runs instead of silently reverting to the window's verdict. Longest matching
+    prefix wins, so a nested override beats a broader one.
+    """
+    if not path.exists():
+        return []
+    out = []
+    for r in read_face_rows(path):
+        sub = (r.get("subdir") or "").strip().strip("/")
+        scene = (r.get("scene") or "").strip().lower()
+        if not sub or not scene:
+            continue
+        if scene not in ("indoor", "outdoor"):
+            print(f"  ! {path}: ignoring {sub!r} -> bad scene {scene!r} "
+                  "(want indoor/outdoor)", file=sys.stderr)
+            continue
+        out.append((sub + "/", scene))
+    out.sort(key=lambda t: len(t[0]), reverse=True)
+    return out
+
+
+def _override_scene(fn: str, overrides: list) -> str:
+    """Forced scene for filename fn, or '' if no override prefix matches."""
+    for pref, scene in overrides:
+        if fn.startswith(pref):
+            return scene
+    return ""
+
+
 def cmd_scene(args) -> int:
     album = Path(args.album)
     try:
@@ -886,7 +921,10 @@ def cmd_scene(args) -> int:
         images = [p for p in images if rel_key(p, album) in wanted]
     # --subdir scopes classification to one import folder (album/<subdir>/) and
     # merges into scene.csv, so a batch whose outdoor block differs from earlier
-    # ones can be re-tagged without re-tagging (and mis-tagging) the rest.
+    # ones can be re-tagged without re-tagging (and mis-tagging) the rest. Note this
+    # is a one-shot re-tag, NOT a durable per-folder setting: a later full `scene`
+    # run rewrites every row by the global --outdoor-hours window and reverts it. For
+    # a per-folder scene that survives full re-runs, use --overrides instead.
     if args.subdir:
         pref = args.subdir.strip("/") + "/"
         images = [p for p in images if rel_key(p, album).startswith(pref)]
@@ -900,6 +938,8 @@ def cmd_scene(args) -> int:
         return 1
 
     hours = _parse_hours(args.outdoor_hours)
+    overrides = _load_scene_overrides(Path(args.overrides))
+    forced = 0      # rows whose verdict an override changed
     out = Path(args.out)
     new_rows = []   # full csv rows just classified
     summary = []    # (hour, scene) for the by-hour readout
@@ -917,8 +957,13 @@ def cmd_scene(args) -> int:
             pass
         for path in seq:
             hr = _exif_hour(path)
+            fn = rel_key(path, album)
             scene = "outdoor" if hr in hours else "indoor"
-            new_rows.append([rel_key(path, album), str(hr), "", "", "", scene])
+            ov = _override_scene(fn, overrides)
+            if ov:
+                forced += ov != scene
+                scene = ov
+            new_rows.append([fn, str(hr), "", "", "", scene])
             summary.append((hr, scene))
     else:
         stream = _prefetch(images, args.prefetch, loader=_decode_pil)
@@ -932,10 +977,15 @@ def cmd_scene(args) -> int:
                 continue
             g, s, b = _scene_stats(im)
             hr = _exif_hour(path)
+            fn = rel_key(path, album)
             green_out = (g + s) >= args.thresh
             out_flag = (green_out and hr in hours) if args.method == "both" else green_out
             scene = "outdoor" if out_flag else "indoor"
-            new_rows.append([rel_key(path, album), str(hr), f"{g:.3f}", f"{s:.3f}", f"{b:.3f}", scene])
+            ov = _override_scene(fn, overrides)
+            if ov:
+                forced += ov != scene
+                scene = ov
+            new_rows.append([fn, str(hr), f"{g:.3f}", f"{s:.3f}", f"{b:.3f}", scene])
             summary.append((hr, scene))
 
     header = ["filename", "hour", "green", "sky", "bright", "scene"]
@@ -959,6 +1009,9 @@ def cmd_scene(args) -> int:
     sc = Counter(s for _, s in summary)
     print(f"\n{len(summary)} images classified -> {out}{note}: "
           f"{sc.get('outdoor',0)} outdoor, {sc.get('indoor',0)} indoor")
+    if overrides:
+        print(f"  ({forced} verdict(s) forced by {len(overrides)} override(s) "
+              f"in {args.overrides})")
     print("\nby hour (validates against the daily schedule):")
     print(f"  {'hour':>4} {'outdoor':>8} {'indoor':>7}")
     by_hour: dict[int, Counter] = defaultdict(Counter)
@@ -1371,6 +1424,17 @@ def cmd_query(args) -> int:
         print("Give at least one of --with / --any / --only.", file=sys.stderr)
         return 1
 
+    # Reject typo'd names up front. A name that no photo carries matches nothing,
+    # which is indistinguishable from a real but absent person -- so a typo would
+    # silently produce an empty result. Validate against the names actually present
+    # in image_people.csv and fail loudly instead.
+    known = set().union(*data.values()) if data else set()
+    unknown = sorted((want | any_of | without | only) - known)
+    if unknown:
+        print(f"Unknown name(s): {', '.join(unknown)}", file=sys.stderr)
+        print(f"Known names: {', '.join(sorted(known)) or '(none)'}", file=sys.stderr)
+        return 1
+
     # Optional indoor/outdoor data from a `scene` pass — drives both --where
     # (filter to one scene) and --split-scene (fan into indoor/outdoor subfolders).
     if args.where and args.split_scene:
@@ -1492,7 +1556,8 @@ def cmd_query(args) -> int:
             for p in sorted(out.rglob("*")):
                 if p.is_file():
                     zf.write(p, p.relative_to(out.parent))
-        print(f"Zipped -> {zpath}")
+        mb = zpath.stat().st_size / (1024 * 1024)
+        print(f"{n} image(s) ({mb:.1f} MB) written to {zpath}")
     return 0
 
 
@@ -2934,6 +2999,10 @@ def main() -> int:
                             "daily schedule is rigid), green=foliage/sky colour, both=AND")
     p_scn.add_argument("--outdoor-hours", default="10-11",
                        help="outdoor hour window for time/both, e.g. 10-11 (default: 10-11)")
+    p_scn.add_argument("--overrides", default="scene_overrides.csv",
+                       help="per-folder scene overrides (CSV: subdir,scene) applied "
+                            "after classification; forces off-schedule folders (e.g. a "
+                            "4pm graduation) to a fixed tag that survives full re-runs")
     p_scn.add_argument("--subdir", default="",
                        help="only classify images under album/<subdir>/ and MERGE into "
                             "scene.csv, keeping other batches' rows. Use when an import's "
