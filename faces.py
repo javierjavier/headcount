@@ -1805,12 +1805,19 @@ function prettyTime(dt) {                           // "2026:06:03 09:23:03" -> 
   return h + ":" + String(m).padStart(2,"0") + " " + ap;
 }
 
-function matches(it) {
-  if (S.names.size) {
-    const has = it.n.filter(n => S.names.has(n)).length;
-    if (S.mode === "all" && has < S.names.size) return false;
-    if (S.mode === "any" && has === 0) return false;
-  }
+// true when `it` satisfies the name filter for an explicit name set (empty set =
+// no constraint). Pulled out so the facet counters can ask the same question for
+// a hypothetical selection (e.g. "current names plus this one").
+function nameSetMatch(it, set, mode) {
+  if (!set.size) return true;
+  const has = it.n.filter(n => set.has(n)).length;
+  return mode === "all" ? has >= set.size : has > 0;
+}
+
+// All filter predicates. `skip` lets a caller drop the name or folder test so the
+// facet counters can vary one control while holding the rest of the filters fixed.
+function passes(it, skip) {
+  if (!(skip && skip.names) && !nameSetMatch(it, S.names, S.mode)) return false;
   if (it.fc != null && (it.fc < S.fmin || it.fc > S.fmax)) return false; // uncounted item always passes
   if (it.h !== null && (it.h < S.hmin || it.h > S.hmax)) return false;   // unknown hour always passes
   if (DAYS.length && it.dt) {                                            // undated item always passes
@@ -1820,9 +1827,10 @@ function matches(it) {
   if (S.scene && it.s && it.s !== S.scene) return false;                 // unknown scene always passes
 
   if (!S.media[mediaCat(it)]) return false;
-  if (S.foldersOff.has(it.sf)) return false;                            // deselected subfolder
+  if (!(skip && skip.folders) && S.foldersOff.has(it.sf)) return false; // deselected subfolder
   return true;
 }
+function matches(it) { return passes(it, null); }
 
 // --- preview warming: decode each on-screen thumbnail's 2048px preview in the
 // background so the lightbox opens instantly. The server caches each render to
@@ -1888,6 +1896,7 @@ let current = [];
 function render() {
   saveState();
   renderActive();
+  updateNameCounts(); updateFolderCounts();   // facet counts track the live filter set
   $("reset").disabled = !filtersActive();
   current = DATA.items.filter(matches);
   current.sort((a,b) => {
@@ -1960,16 +1969,48 @@ function faceLabel() {
   else lab.textContent = S.fmin + " – " + S.fmax + " faces";
 }
 
-function buildNames() {
-  const box = $("names"); box.innerHTML = "";
+// absolute roster size per name — drives the stable "Most/Fewest photos" sort so
+// the list doesn't reorder under you as live counts change on every click.
+const nameTotals = {};
+for (const n of DATA.names) nameTotals[n] = 0;
+for (const it of DATA.items) for (const n of it.n) nameTotals[n] = (nameTotals[n] || 0) + 1;
+
+// name -> its live count <span>, repopulated each buildNames() (search trims the list).
+const nameCountEl = new Map();
+const folderCountEl = new Map();
+
+// Faceted name counts (Option B): for each name, how many items the current view
+// would hold if you toggled that one checkbox, holding every other filter fixed.
+// So an unchecked name previews "results if I add it" (in "all of" mode, the
+// co-occurrence with the names already picked); a checked name previews removing it.
+function updateNameCounts() {
+  const base = DATA.items.filter(it => passes(it, { names: true }));
+  for (const [n, el] of nameCountEl) {
+    const hyp = new Set(S.names);
+    hyp.has(n) ? hyp.delete(n) : hyp.add(n);
+    let c = 0;
+    for (const it of base) if (nameSetMatch(it, hyp, S.mode)) c++;
+    el.textContent = c;
+  }
+}
+
+// Folders are single-valued and OR together, so each folder's facet count is just
+// its bucket size under all the other (non-folder) filters — toggling one folder
+// doesn't change another's number, only names/dates/etc. do.
+function updateFolderCounts() {
   const counts = {};
-  for (const n of DATA.names) counts[n] = 0;
-  for (const it of DATA.items) for (const n of it.n) counts[n] = (counts[n]||0) + 1;
+  for (const f of FOLDERS) counts[f] = 0;
+  for (const it of DATA.items) if (passes(it, { folders: true }) && counts[it.sf] !== undefined) counts[it.sf]++;
+  for (const [f, el] of folderCountEl) el.textContent = counts[f] || 0;
+}
+
+function buildNames() {
+  const box = $("names"); box.innerHTML = ""; nameCountEl.clear();
   // Order the roster by the chosen key; ties (and equal counts) fall back to A→Z.
   const order = [...DATA.names].sort((a, b) =>
     S.nsort === "za" ? b.localeCompare(a) :
-    S.nsort === "hi" ? (counts[b] - counts[a]) || a.localeCompare(b) :
-    S.nsort === "lo" ? (counts[a] - counts[b]) || a.localeCompare(b) :
+    S.nsort === "hi" ? (nameTotals[b] - nameTotals[a]) || a.localeCompare(b) :
+    S.nsort === "lo" ? (nameTotals[a] - nameTotals[b]) || a.localeCompare(b) :
     a.localeCompare(b));
   for (const n of order) {
     if (S.search && !n.toLowerCase().includes(S.search)) continue;
@@ -1978,26 +2019,27 @@ function buildNames() {
     cb.type = "checkbox"; cb.checked = S.names.has(n);
     cb.onchange = () => { cb.checked ? S.names.add(n) : S.names.delete(n); render(); };
     const span = document.createElement("span"); span.textContent = n;
-    const c = document.createElement("span"); c.className = "count"; c.textContent = counts[n];
+    const c = document.createElement("span"); c.className = "count";
     lab.append(cb, span, c); box.appendChild(lab);
+    nameCountEl.set(n, c);
   }
+  updateNameCounts();
 }
 
 const folderLabel = f => f === "" ? "album root" : f;
 function buildFolders() {
-  const box = $("folders"); box.innerHTML = "";
-  const counts = {};
-  for (const f of FOLDERS) counts[f] = 0;
-  for (const it of DATA.items) counts[it.sf] = (counts[it.sf] || 0) + 1;
+  const box = $("folders"); box.innerHTML = ""; folderCountEl.clear();
   for (const f of FOLDERS) {
     const lab = document.createElement("label");
     const cb = document.createElement("input");
     cb.type = "checkbox"; cb.checked = !S.foldersOff.has(f);
     cb.onchange = () => { cb.checked ? S.foldersOff.delete(f) : S.foldersOff.add(f); render(); };
     const span = document.createElement("span"); span.textContent = folderLabel(f);
-    const c = document.createElement("span"); c.className = "count"; c.textContent = counts[f];
+    const c = document.createElement("span"); c.className = "count";
     lab.append(cb, span, c); box.appendChild(lab);
+    folderCountEl.set(f, c);
   }
+  updateFolderCounts();
 }
 
 // --- lightbox: show the (already-loaded) thumbnail instantly, swap in the
