@@ -1581,7 +1581,14 @@ SERVE_PAGE = """<!doctype html>
   .dhead { flex:none; width:30px; height:var(--cell); transition:height .12s ease; display:flex; align-items:center; justify-content:center;
            writing-mode:vertical-rl; text-orientation:mixed; white-space:nowrap;
            font-size:11px; font-weight:600; color:var(--muted); letter-spacing:.02em;
-           border-left:2px solid var(--line); }
+           border-left:2px solid var(--line); cursor:pointer; user-select:none; }
+  .dhead:hover { color:var(--text); border-left-color:var(--accent); }
+  /* collapsed day: a full-width horizontal bar standing in for the hidden run of cells */
+  .dhead.collapsed { width:100%; flex-basis:100%; height:auto; writing-mode:horizontal-tb;
+                     justify-content:flex-start; gap:6px; padding:7px 10px; background:var(--panel);
+                     border-radius:8px; border-left:0; }
+  .dhead.collapsed:hover { border-left:0; background:var(--line); }
+  .dhead.collapsed .cnt { color:var(--muted); font-weight:400; }
   .empty { color:var(--muted); padding:40px 0; text-align:center; }
   /* lightbox */
   #lb { display:none; position:fixed; inset:0; background:rgba(8,9,12,.92); z-index:50;
@@ -1697,7 +1704,7 @@ SERVE_PAGE = """<!doctype html>
 
 <script>
 const DATA = __MANIFEST__;
-const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, dmin:0, dmax:0, scene:"", media:{photo:true, live:true, video:true}, foldersOff:new Set(), foldOpen:false, search:"", sort:"new", nsort:"az", cell:150 };
+const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, dmin:0, dmax:0, scene:"", media:{photo:true, live:true, video:true}, foldersOff:new Set(), foldOpen:false, collapsedDays:new Set(), search:"", sort:"new", nsort:"az", cell:150 };
 // album subfolders present in the data (""=album root). Stored as an *exclude*
 // set so the default (nothing excluded) shows everything and a freshly imported
 // subfolder is visible without clearing saved filters.
@@ -1731,7 +1738,7 @@ S.fmin = FCMIN; S.fmax = FCMAX;
 const SKEY = "headcount.filters.v1";
 function saveState() {
   try { localStorage.setItem(SKEY, JSON.stringify({
-    names:[...S.names], mode:S.mode, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, dlo:DAYS[S.dmin] || "", dhi:DAYS[S.dmax] || "", scene:S.scene, media:S.media, foldersOff:[...S.foldersOff], foldOpen:S.foldOpen, sort:S.sort, nsort:S.nsort, cell:S.cell
+    names:[...S.names], mode:S.mode, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, dlo:DAYS[S.dmin] || "", dhi:DAYS[S.dmax] || "", scene:S.scene, media:S.media, foldersOff:[...S.foldersOff], foldOpen:S.foldOpen, collapsedDays:[...S.collapsedDays], sort:S.sort, nsort:S.nsort, cell:S.cell
   })); } catch (e) {}
 }
 function loadState() {
@@ -1758,6 +1765,10 @@ function loadState() {
     S.foldersOff = new Set(v.foldersOff.filter(f => kf.has(f)));
   }
   if (typeof v.foldOpen === "boolean") S.foldOpen = v.foldOpen;
+  if (Array.isArray(v.collapsedDays)) {                          // drop days absent from this album
+    const kd = new Set(DAYS);
+    S.collapsedDays = new Set(v.collapsedDays.filter(d => kd.has(d)));
+  }
   if (v.sort === "old" || v.sort === "new") S.sort = v.sort;
   if (["az","za","hi","lo"].includes(v.nsort)) S.nsort = v.nsort;
   if (typeof v.cell === "number") S.cell = Math.min(Math.max(v.cell, 90), 300);
@@ -1862,17 +1873,31 @@ function render() {
   if (warmIO) warmIO.disconnect();   // drop observations on the cells we're about to discard
   grid.innerHTML = "";
   const frag = document.createDocumentFragment();
+  const dayCount = new Map();                              // matched items per day, computed once
+  for (const it of current) { const d = dayOf(it); dayCount.set(d, (dayCount.get(d) || 0) + 1); }
   let lastDay = null;
   current.forEach((it, i) => {
     const day = dayOf(it);
     if (day !== lastDay) {
       lastDay = day;
-      const sameDay = current.filter(o => dayOf(o) === day).length;
-      const h = document.createElement("div"); h.className = "dhead";
+      const sameDay = dayCount.get(day);
+      const collapsed = S.collapsedDays.has(day);
+      const h = document.createElement("div"); h.className = collapsed ? "dhead collapsed" : "dhead";
       h.textContent = prettyDayShort(day);
-      h.title = prettyDay(day) + " · " + sameDay + " item" + (sameDay === 1 ? "" : "s");
+      if (collapsed) {                                     // horizontal bar: "06/26/2026  (22 items)"
+        const c = document.createElement("span"); c.className = "cnt";
+        c.textContent = "(" + sameDay + " item" + (sameDay === 1 ? "" : "s") + ")";
+        h.appendChild(c);
+      }
+      h.title = prettyDay(day) + " · " + sameDay + " item" + (sameDay === 1 ? "" : "s")
+              + (collapsed ? " — click to expand" : " — click to collapse");
+      h.onclick = () => {
+        if (S.collapsedDays.has(day)) S.collapsedDays.delete(day); else S.collapsedDays.add(day);
+        render();
+      };
       frag.appendChild(h);
     }
+    if (S.collapsedDays.has(day)) return;                  // collapsed day: skip its cells (count/export unaffected)
     const cell = document.createElement("button");
     cell.className = it.v ? "cell vid" : "cell";
     cell.title = it.n.join(", ") || (it.v ? "video" : "");
