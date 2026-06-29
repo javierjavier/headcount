@@ -216,6 +216,34 @@ Three things needed handling that photos didn't:
   unsatisfiable→416). Codec support is the browser's: H.264 `.mp4` is universal,
   HEVC `.mov` is Safari-only — so the lightbox always offers a download link.
 
+## Scene tagging: the time window and per-folder overrides
+
+`scene` defaults to `--method time`: a photo is `outdoor` iff its EXIF capture
+hour falls in `--outdoor-hours` (default `10-11`, the daily outdoor block). This
+beats the pixel (`green`) method on the regular album because green classroom
+decor reads as foliage and leaks false "outdoor"; the rigid daily schedule is a
+cleaner signal than the pixels. The window is **one value per run**, applied to
+every photo — what varies per photo is its capture hour, compared against that
+window.
+
+That breaks for a one-off event on a *different* schedule — e.g. an all-outdoor
+4pm graduation. `--subdir` lets you re-tag just that folder with a different
+`--outdoor-hours`, but that is a **one-shot** rewrite, not a stored setting:
+nothing records *why* those rows are outdoor, so the next full `scene` run
+re-judges every row against the global window and silently reverts them. (This
+bit us once: the graduation folder reverted to indoor and the cause was
+invisible — the EXIF hour column still read `16`, because that hour is re-read
+from the photo every run; only the *verdict* had flipped.)
+
+`scene_overrides.csv` (CSV: `subdir,scene`) makes per-folder scene **durable**.
+Every `scene` run applies it *after* time/green classification, so a listed
+folder is forced to its tag (`indoor`/`outdoor`) regardless of the window and
+survives full re-runs. Longest matching prefix wins (a nested override beats a
+broader one); the match is prefix-on-`subdir/` so a sibling sharing a date
+prefix isn't caught. It's gitignored under the `scene*` rule like all other
+scene data — the folder names are event-identifying, and it's local config, not
+shared state.
+
 ## Data artifacts
 
 | File | Phase | Contents |
