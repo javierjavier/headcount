@@ -105,6 +105,36 @@ def read_done_manifest(done_path: Path) -> set[str]:
     return done
 
 
+def _file_hash(path: Path) -> str:
+    """Content hash (md5 hex) of a file's raw bytes, read in chunks.
+
+    Used to skip re-embedding byte-identical photos that arrive under a second
+    path — the common case when several teachers re-share an overlapping batch
+    (`embed` otherwise keys only on the album-relative path, so the same image
+    in two subfolders is embedded twice). This catches *byte-identical* copies,
+    not visually-equal re-encodes (those decode differently and would need a
+    perceptual hash); raw bytes are cheap (no decode) and cover the re-upload
+    case we actually see. md5 is for dedup, not security.
+    """
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read_hash_manifest(path: Path) -> dict[str, str]:
+    """Read the `faces.hashes` sidecar as {album-relative filename: content hash}."""
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    with path.open(newline="") as f:
+        for row in csv.reader(f):
+            if len(row) == 2:
+                out[row[0]] = row[1]
+    return out
+
+
 def _next_face_id(csv_path: Path) -> int:
     """Largest face_id in *csv_path* + 1, so a resumed run keeps numbering."""
     last = -1
@@ -247,6 +277,7 @@ def cmd_embed(args) -> int:
     faces_csv = Path(args.faces)
     emb_path = faces_csv.with_suffix(".emb")
     done_path = faces_csv.with_suffix(".done")
+    hash_path = faces_csv.with_suffix(".hashes")
 
     # Repair a desynced csv/emb pair (e.g. a kill between the two writes) by
     # trimming to the last consistent image, instead of forcing a full --rescan.
@@ -262,8 +293,62 @@ def cmd_embed(args) -> int:
         todo = todo[: args.limit]
 
     print(f"{len(images)} images, {len(done)} already embedded, {len(todo)} to embed.")
+
+    # Content-dedup: skip a to-embed image whose raw bytes match one already
+    # embedded (or an earlier image this run). `embed` keys only on the album
+    # path, so the same photo re-shared under a second subfolder would otherwise
+    # be embedded — and clustered/shown/exported — twice. We persist a
+    # filename->hash sidecar so this stays incremental; the first guarded run
+    # over an existing album back-fills hashes for what's already embedded (a
+    # one-time read), after which only new images are hashed. --no-dedup skips
+    # the whole thing. See _file_hash for what "duplicate" means (byte-identical).
+    seen_hash: dict[str, str] = {}
+    hash_of: dict[str, str] = {}
+    dups: list[tuple[str, str]] = []   # (duplicate key, canonical key it matches)
+    if not args.no_dedup and todo:
+        key_to_path = {rel_key(p, album): p for p in images}
+        recorded = read_hash_manifest(hash_path)
+        backfill = [k for k in done if k not in recorded and k in key_to_path]
+        if backfill:
+            print(f"Indexing content hashes for {len(backfill)} already-embedded "
+                  f"image(s) (one-time, enables dedup) ...")
+            with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
+                for k, hh in zip(backfill, ex.map(lambda k: _file_hash(key_to_path[k]), backfill)):
+                    recorded[k] = hh
+            with hash_path.open("a", newline="") as hf:
+                w = csv.writer(hf)
+                for k in backfill:
+                    w.writerow([k, recorded[k]])
+        for k, hh in recorded.items():
+            seen_hash.setdefault(hh, k)   # first key wins as the canonical copy
+
+        kept = []
+        with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
+            todo_keys = [rel_key(p, album) for p in todo]
+            for p, key, hh in zip(todo, todo_keys, ex.map(_file_hash, todo)):
+                canon = seen_hash.get(hh)
+                if canon is not None:
+                    dups.append((key, canon))
+                else:
+                    seen_hash[hh] = key
+                    hash_of[key] = hh
+                    kept.append(p)
+        if dups:
+            print(f"Skipping {len(dups)} byte-identical duplicate(s); "
+                  f"{len(kept)} unique image(s) to embed.")
+            for dk, ck in dups[:10]:
+                print(f"  dup: {dk}  ==  {ck}")
+            if len(dups) > 10:
+                print(f"  ... and {len(dups) - 10} more")
+        todo = kept
+
     if not todo:
         print("Nothing to do. (Use --rescan to start over.)")
+        # Still record any duplicates as processed so they aren't re-hashed next run.
+        if dups:
+            with done_path.open("a") as df:
+                for dk, _ in dups:
+                    df.write(dk + "\n")
         _finalize_npy(emb_path, faces_csv)
         return 0
 
@@ -290,10 +375,17 @@ def cmd_embed(args) -> int:
     # double-counted (it's already in faces.csv, which the resume union also
     # consults), while zero-face images still get marked processed.
     with faces_csv.open("a", newline="") as cf, emb_path.open("ab") as ef, \
-            done_path.open("a") as df:
+            done_path.open("a") as df, hash_path.open("a", newline="") as hf:
         writer = csv.writer(cf)
+        hash_writer = csv.writer(hf)
         if new_csv:
             writer.writerow(FACES_HEADER)
+        # Record skipped duplicates as processed up front so a crash mid-run
+        # doesn't leave them to be re-hashed (their bytes are already embedded
+        # under the canonical key).
+        for dk, _ in dups:
+            df.write(dk + "\n")
+        df.flush()
         for path, decoded in stream:
             if isinstance(decoded, Exception):
                 print(f"\n  ! {path.name}: {decoded}")
@@ -318,6 +410,9 @@ def cmd_embed(args) -> int:
             ef.flush()
             df.write(key + "\n")
             df.flush()
+            if key in hash_of:                 # persist this image's content hash
+                hash_writer.writerow([key, hash_of[key]])
+                hf.flush()
 
     print(f"\nEmbedded {n_faces} face(s) from {len(todo)} image(s) -> {faces_csv}")
     _finalize_npy(emb_path, faces_csv)
@@ -1427,6 +1522,10 @@ SERVE_PAGE = """<!doctype html>
   main { flex:1; overflow-y:auto; padding:16px 20px; }
   h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:20px 0 8px; }
   h2:first-child { margin-top:0; }
+  h2.toggle { cursor:pointer; user-select:none; display:flex; align-items:center; gap:6px; }
+  h2.toggle::before { content:"\\25be"; font-size:11px; transition:transform .12s; }   /* ▾ */
+  h2.toggle.closed::before { transform:rotate(-90deg); }                                /* ▸ when collapsed */
+  h2.toggle.closed + * { display:none !important; }
   input[type=search], select { width:100%; padding:7px 9px; background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:7px; }
   .names { max-height:38vh; overflow-y:auto; border:1px solid var(--line); border-radius:7px; padding:6px; margin-top:8px; }
   .names label { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:5px; cursor:pointer; }
@@ -1464,6 +1563,10 @@ SERVE_PAGE = """<!doctype html>
   .bar .spacer { flex:1; }
   button { background:var(--accent); color:#fff; border:0; padding:8px 16px; border-radius:7px; font-weight:600; cursor:pointer; }
   button:disabled { opacity:.4; cursor:default; }
+  /* sidebar global reset: ghost button, dim until some filter is active */
+  .reset { width:100%; margin-bottom:6px; background:none; color:var(--muted); border:1px solid var(--line); padding:8px 12px; font-weight:500; }
+  .reset:hover:not(:disabled) { color:var(--ink); border-color:var(--accent); }
+  .reset:disabled { opacity:.45; cursor:default; }
   .ctl { display:flex; align-items:center; gap:8px; color:var(--muted); }
   .ctl select { width:auto; }
   .grid { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-start; }
@@ -1482,7 +1585,14 @@ SERVE_PAGE = """<!doctype html>
   .dhead { flex:none; width:30px; height:var(--cell); transition:height .12s ease; display:flex; align-items:center; justify-content:center;
            writing-mode:vertical-rl; text-orientation:mixed; white-space:nowrap;
            font-size:11px; font-weight:600; color:var(--muted); letter-spacing:.02em;
-           border-left:2px solid var(--line); }
+           border-left:2px solid var(--line); cursor:pointer; user-select:none; }
+  .dhead:hover { color:var(--ink); border-left-color:var(--accent); }
+  /* collapsed day: a full-width horizontal bar standing in for the hidden run of cells */
+  .dhead.collapsed { width:100%; flex-basis:100%; height:auto; writing-mode:horizontal-tb;
+                     justify-content:flex-start; gap:6px; padding:7px 10px; background:var(--panel);
+                     border-radius:8px; border-left:0; }
+  .dhead.collapsed:hover { border-left:0; background:var(--line); }
+  .dhead.collapsed .cnt { color:var(--muted); font-weight:400; }
   .empty { color:var(--muted); padding:40px 0; text-align:center; }
   /* lightbox */
   #lb { display:none; position:fixed; inset:0; background:rgba(8,9,12,.92); z-index:50;
@@ -1506,6 +1616,7 @@ SERVE_PAGE = """<!doctype html>
 <body>
 <div class="wrap">
   <aside>
+    <button id="reset" class="reset" title="Clear every filter and view setting back to default" disabled>Reset all filters</button>
     <h2>Names</h2>
     <input type="search" id="nsearch" placeholder="filter names…" autocomplete="off">
     <div class="modes">
@@ -1547,6 +1658,16 @@ SERVE_PAGE = """<!doctype html>
       <label><input type="checkbox" data-media="live" checked> live photos</label>
       <label><input type="checkbox" data-media="video" checked> videos</label>
     </div>
+    <h2 id="datehead">Date</h2>
+    <div class="rangewrap" id="datewrap">
+      <div class="track"></div>
+      <div class="fill" id="dfill"></div>
+      <input type="range" id="dmin" step="1">
+      <input type="range" id="dmax" step="1">
+    </div>
+    <div class="hourlab" id="datelab"></div>
+    <h2 id="foldhead" class="toggle closed">Folder</h2>
+    <div class="names" id="folders"></div>
     <h2>Preview size</h2>
     <input type="range" class="sizerange" id="csize" min="90" max="300" step="10">
   </aside>
@@ -1588,7 +1709,11 @@ SERVE_PAGE = """<!doctype html>
 
 <script>
 const DATA = __MANIFEST__;
-const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, scene:"", media:{photo:true, live:true, video:true}, search:"", sort:"new", nsort:"az", cell:150 };
+const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, dmin:0, dmax:0, scene:"", media:{photo:true, live:true, video:true}, foldersOff:new Set(), foldOpen:false, collapsedDays:new Set(), search:"", sort:"new", nsort:"az", cell:150 };
+// album subfolders present in the data (""=album root). Stored as an *exclude*
+// set so the default (nothing excluded) shows everything and a freshly imported
+// subfolder is visible without clearing saved filters.
+const FOLDERS = DATA.folders || [];
 const LIVE_MAX = DATA.liveMax || 3.5;   // videos <= this many seconds are "live photos"
 // media bucket for an item: photo / live (short clip) / video (everything else,
 // incl. clips whose duration is unknown so they're never hidden as "live").
@@ -1600,6 +1725,14 @@ const hrs = DATA.items.map(i => i.h).filter(h => h !== null);
 const HMIN = hrs.length ? Math.min(...hrs) : 0, HMAX = hrs.length ? Math.max(...hrs) : 23;
 S.hmin = HMIN; S.hmax = HMAX;
 
+// distinct capture days present (ISO "YYYY-MM-DD", sorted ascending). The date
+// slider works on indices into this array; undated items (no dt) ignore it. We
+// persist the day *strings* (not indices) so saved filters survive new imports
+// shifting the index positions.
+const DAYS = [...new Set(DATA.items.map(i => i.dt ? i.dt.slice(0,10).replace(/:/g,"-") : "").filter(Boolean))].sort();
+const DMIN = 0, DMAX = DAYS.length ? DAYS.length - 1 : 0;
+S.dmin = DMIN; S.dmax = DMAX;
+
 // face-count bounds present in the data (items with a known count; videos/
 // uncounted photos are null and ignored here — they always pass the filter)
 const fcs = DATA.items.map(i => i.fc).filter(c => c !== null && c !== undefined);
@@ -1610,7 +1743,7 @@ S.fmin = FCMIN; S.fmax = FCMAX;
 const SKEY = "headcount.filters.v1";
 function saveState() {
   try { localStorage.setItem(SKEY, JSON.stringify({
-    names:[...S.names], mode:S.mode, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, scene:S.scene, media:S.media, sort:S.sort, nsort:S.nsort, cell:S.cell
+    names:[...S.names], mode:S.mode, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, dlo:DAYS[S.dmin] || "", dhi:DAYS[S.dmax] || "", scene:S.scene, media:S.media, foldersOff:[...S.foldersOff], foldOpen:S.foldOpen, collapsedDays:[...S.collapsedDays], sort:S.sort, nsort:S.nsort, cell:S.cell
   })); } catch (e) {}
 }
 function loadState() {
@@ -1625,9 +1758,21 @@ function loadState() {
   if (typeof v.hmin === "number") S.hmin = Math.min(Math.max(v.hmin, HMIN), HMAX);   // clamp to data bounds
   if (typeof v.hmax === "number") S.hmax = Math.min(Math.max(v.hmax, HMIN), HMAX);
   if (S.hmin > S.hmax) { S.hmin = HMIN; S.hmax = HMAX; }
+  if (typeof v.dlo === "string") { const i = DAYS.indexOf(v.dlo); if (i >= 0) S.dmin = i; }   // re-anchor by day
+  if (typeof v.dhi === "string") { const i = DAYS.indexOf(v.dhi); if (i >= 0) S.dmax = i; }
+  if (S.dmin > S.dmax) { S.dmin = DMIN; S.dmax = DMAX; }
   if (v.scene === "indoor" || v.scene === "outdoor") S.scene = v.scene;
   if (v.media && typeof v.media === "object") {
     for (const k of ["photo", "live", "video"]) if (typeof v.media[k] === "boolean") S.media[k] = v.media[k];
+  }
+  if (Array.isArray(v.foldersOff)) {                              // drop folders absent from this album
+    const kf = new Set(FOLDERS);
+    S.foldersOff = new Set(v.foldersOff.filter(f => kf.has(f)));
+  }
+  if (typeof v.foldOpen === "boolean") S.foldOpen = v.foldOpen;
+  if (Array.isArray(v.collapsedDays)) {                          // drop days absent from this album
+    const kd = new Set(DAYS);
+    S.collapsedDays = new Set(v.collapsedDays.filter(d => kd.has(d)));
   }
   if (v.sort === "old" || v.sort === "new") S.sort = v.sort;
   if (["az","za","hi","lo"].includes(v.nsort)) S.nsort = v.nsort;
@@ -1668,9 +1813,14 @@ function matches(it) {
   }
   if (it.fc != null && (it.fc < S.fmin || it.fc > S.fmax)) return false; // uncounted item always passes
   if (it.h !== null && (it.h < S.hmin || it.h > S.hmax)) return false;   // unknown hour always passes
+  if (DAYS.length && it.dt) {                                            // undated item always passes
+    const d = it.dt.slice(0,10).replace(/:/g,"-");
+    if (d < DAYS[S.dmin] || d > DAYS[S.dmax]) return false;             // ISO days compare lexically
+  }
   if (S.scene && it.s && it.s !== S.scene) return false;                 // unknown scene always passes
 
   if (!S.media[mediaCat(it)]) return false;
+  if (S.foldersOff.has(it.sf)) return false;                            // deselected subfolder
   return true;
 }
 
@@ -1709,10 +1859,36 @@ function renderActive() {
   box.appendChild(clr);
 }
 
+// true when anything narrows the view from its default (drives the Reset button's
+// enabled state). Display prefs (sort, preview size, name-list order) don't count.
+function filtersActive() {
+  return S.names.size > 0
+    || S.fmin !== FCMIN || S.fmax !== FCMAX
+    || S.hmin !== HMIN || S.hmax !== HMAX
+    || S.dmin !== DMIN || S.dmax !== DMAX
+    || S.scene !== ""
+    || !S.media.photo || !S.media.live || !S.media.video
+    || S.foldersOff.size > 0 || S.collapsedDays.size > 0;
+}
+
+// clear every filter + view-narrowing setting, then reload so each widget re-inits
+// from the cleared state (cheaper and far less error-prone than re-syncing ~12 controls).
+function resetFilters() {
+  S.names = new Set(); S.mode = "all"; S.search = "";
+  S.fmin = FCMIN; S.fmax = FCMAX;
+  S.hmin = HMIN; S.hmax = HMAX;
+  S.dmin = DMIN; S.dmax = DMAX;
+  S.scene = ""; S.media = { photo:true, live:true, video:true };
+  S.foldersOff = new Set(); S.collapsedDays = new Set();
+  saveState();
+  location.reload();
+}
+
 let current = [];
 function render() {
   saveState();
   renderActive();
+  $("reset").disabled = !filtersActive();
   current = DATA.items.filter(matches);
   current.sort((a,b) => {
     const x = a.dt || "", y = b.dt || "";
@@ -1728,17 +1904,31 @@ function render() {
   if (warmIO) warmIO.disconnect();   // drop observations on the cells we're about to discard
   grid.innerHTML = "";
   const frag = document.createDocumentFragment();
+  const dayCount = new Map();                              // matched items per day, computed once
+  for (const it of current) { const d = dayOf(it); dayCount.set(d, (dayCount.get(d) || 0) + 1); }
   let lastDay = null;
   current.forEach((it, i) => {
     const day = dayOf(it);
     if (day !== lastDay) {
       lastDay = day;
-      const sameDay = current.filter(o => dayOf(o) === day).length;
-      const h = document.createElement("div"); h.className = "dhead";
+      const sameDay = dayCount.get(day);
+      const collapsed = S.collapsedDays.has(day);
+      const h = document.createElement("div"); h.className = collapsed ? "dhead collapsed" : "dhead";
       h.textContent = prettyDayShort(day);
-      h.title = prettyDay(day) + " · " + sameDay + " item" + (sameDay === 1 ? "" : "s");
+      if (collapsed) {                                     // horizontal bar: "06/26/2026  (22 items)"
+        const c = document.createElement("span"); c.className = "cnt";
+        c.textContent = "(" + sameDay + " item" + (sameDay === 1 ? "" : "s") + ")";
+        h.appendChild(c);
+      }
+      h.title = prettyDay(day) + " · " + sameDay + " item" + (sameDay === 1 ? "" : "s")
+              + (collapsed ? " — click to expand" : " — click to collapse");
+      h.onclick = () => {
+        if (S.collapsedDays.has(day)) S.collapsedDays.delete(day); else S.collapsedDays.add(day);
+        render();
+      };
       frag.appendChild(h);
     }
+    if (S.collapsedDays.has(day)) return;                  // collapsed day: skip its cells (count/export unaffected)
     const cell = document.createElement("button");
     cell.className = it.v ? "cell vid" : "cell";
     cell.title = it.n.join(", ") || (it.v ? "video" : "");
@@ -1756,6 +1946,11 @@ function render() {
 function hourLabel() {
   $("hourlab").textContent = (S.hmin === HMIN && S.hmax === HMAX)
     ? "Any time" : (String(S.hmin).padStart(2,"0") + ":00 – " + String(S.hmax).padStart(2,"0") + ":59");
+}
+
+function dateLabel() {
+  $("datelab").textContent = (S.dmin === DMIN && S.dmax === DMAX)
+    ? "Any date" : (prettyDayShort(DAYS[S.dmin]) + " – " + prettyDayShort(DAYS[S.dmax]));
 }
 
 function faceLabel() {
@@ -1784,6 +1979,23 @@ function buildNames() {
     cb.onchange = () => { cb.checked ? S.names.add(n) : S.names.delete(n); render(); };
     const span = document.createElement("span"); span.textContent = n;
     const c = document.createElement("span"); c.className = "count"; c.textContent = counts[n];
+    lab.append(cb, span, c); box.appendChild(lab);
+  }
+}
+
+const folderLabel = f => f === "" ? "album root" : f;
+function buildFolders() {
+  const box = $("folders"); box.innerHTML = "";
+  const counts = {};
+  for (const f of FOLDERS) counts[f] = 0;
+  for (const it of DATA.items) counts[it.sf] = (counts[it.sf] || 0) + 1;
+  for (const f of FOLDERS) {
+    const lab = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = !S.foldersOff.has(f);
+    cb.onchange = () => { cb.checked ? S.foldersOff.delete(f) : S.foldersOff.add(f); render(); };
+    const span = document.createElement("span"); span.textContent = folderLabel(f);
+    const c = document.createElement("span"); c.className = "count"; c.textContent = counts[f];
     lab.append(cb, span, c); box.appendChild(lab);
   }
 }
@@ -1843,6 +2055,7 @@ document.addEventListener("keydown", e => {
   else if (e.key === "ArrowRight") navLB(1);
 });
 
+$("reset").onclick = resetFilters;
 $("nsearch").oninput = e => { S.search = e.target.value.trim().toLowerCase(); buildNames(); };
 $("nsort").value = S.nsort;
 $("nsort").onchange = e => { S.nsort = e.target.value; buildNames(); saveState(); };
@@ -1863,6 +2076,23 @@ function updFill() {
 }
 hmin.oninput = e => { S.hmin = Math.min(+e.target.value, S.hmax); e.target.value = S.hmin; hourLabel(); updFill(); render(); };
 hmax.oninput = e => { S.hmax = Math.max(+e.target.value, S.hmin); e.target.value = S.hmax; hourLabel(); updFill(); render(); };
+// dual range over distinct capture days (by index). Hidden when there's nothing
+// to filter on (0 or 1 distinct day), like the Faces slider.
+const dmin = $("dmin"), dmax = $("dmax");
+if (DAYS.length < 2) {
+  $("datehead").style.display = "none"; $("datewrap").style.display = "none"; $("datelab").style.display = "none";
+} else {
+  dmin.min = dmax.min = DMIN; dmin.max = dmax.max = DMAX;
+  dmin.value = S.dmin; dmax.value = S.dmax;
+  const updDFill = () => {
+    const span = Math.max(1, DMAX - DMIN);
+    $("dfill").style.left = (S.dmin - DMIN) / span * 100 + "%";
+    $("dfill").style.right = (DMAX - S.dmax) / span * 100 + "%";
+  };
+  dmin.oninput = e => { S.dmin = Math.min(+e.target.value, S.dmax); e.target.value = S.dmin; dateLabel(); updDFill(); render(); };
+  dmax.oninput = e => { S.dmax = Math.max(+e.target.value, S.dmin); e.target.value = S.dmax; dateLabel(); updDFill(); render(); };
+  dateLabel(); updDFill();
+}
 // dual range over the face-count bounds. Hidden when there's no spread to filter
 // on (no faces.csv, or every counted item has the same count).
 const fmin = $("fmin"), fmax = $("fmax");
@@ -1886,6 +2116,19 @@ $("scene").onchange = e => { S.scene = e.target.value; render(); };
 for (const cb of document.querySelectorAll('#media input[type=checkbox]')) {
   cb.checked = S.media[cb.dataset.media] !== false;
   cb.onchange = () => { S.media[cb.dataset.media] = cb.checked; render(); };
+}
+// One folder (or none) means nothing to filter on — hide the section, like Faces.
+// Otherwise it's a collapsible section (CSS hides the list while .closed is set).
+const foldhead = $("foldhead");
+if (FOLDERS.length < 2) {
+  foldhead.style.display = "none"; $("folders").style.display = "none";
+} else {
+  foldhead.classList.toggle("closed", !S.foldOpen);   // reflect restored open/closed state
+  foldhead.onclick = () => {
+    S.foldOpen = !S.foldOpen;
+    foldhead.classList.toggle("closed", !S.foldOpen);
+    saveState();
+  };
 }
 // thumbnail size is pure CSS (a custom property) — no re-render needed
 const csize = $("csize");
@@ -1914,7 +2157,7 @@ $("export").onclick = async () => {
   finally { btn.textContent = was; btn.disabled = current.length === 0; }
 };
 
-buildNames(); hourLabel(); updFill(); render();
+buildNames(); buildFolders(); hourLabel(); updFill(); render();
 </script>
 </body>
 </html>"""
@@ -2360,9 +2603,16 @@ def cmd_serve(args) -> int:
         it["d"] = float(durs.get(it["f"], 0.0)) if it["v"] else 0.0
 
     all_names = sorted({n for it in items for n in it["n"]})
-    manifest = {"names": all_names, "liveMax": args.live_max,
+    # Album-relative parent dir of each item (POSIX, see rel_key) — drives the
+    # gallery's per-subfolder filter. Files sitting directly in album/ have no
+    # subfolder; "" groups them together (labelled "album root" client-side).
+    def _subfolder(fn: str) -> str:
+        return fn.rsplit("/", 1)[0] if "/" in fn else ""
+
+    all_folders = sorted({_subfolder(it["f"]) for it in items})
+    manifest = {"names": all_names, "folders": all_folders, "liveMax": args.live_max,
                 "items": [{"k": it["k"], "n": it["n"], "fc": it["fc"],
-                           "h": it["h"], "s": it["s"],
+                           "h": it["h"], "s": it["s"], "sf": _subfolder(it["f"]),
                            "dt": it["dt"], "v": 1 if it["v"] else 0,
                            "d": round(it["d"], 1) if it["v"] else 0}
                           for it in items]}
@@ -2550,6 +2800,8 @@ def main() -> int:
     p_emb.add_argument("--prefetch", type=int, default=2,
                        help="background HEIC-decode threads to overlap with inference (~1.5x; 0=serial)")
     p_emb.add_argument("--limit", type=int, default=0, help="only embed first N images (for testing)")
+    p_emb.add_argument("--no-dedup", action="store_true",
+                       help="embed every image even if byte-identical to one already embedded")
     p_emb.add_argument("--rescan", action="store_true", help="ignore existing faces.csv and start over")
     p_emb.set_defaults(func=cmd_embed)
 
@@ -2703,6 +2955,7 @@ def main() -> int:
         faces_csv.with_suffix(".emb").unlink(missing_ok=True)
         faces_csv.with_suffix(".npy").unlink(missing_ok=True)
         faces_csv.with_suffix(".done").unlink(missing_ok=True)
+        faces_csv.with_suffix(".hashes").unlink(missing_ok=True)
 
     return args.func(args)
 

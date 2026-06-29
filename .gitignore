@@ -13,6 +13,7 @@ faces*.emb
 faces*.npy
 faces*.csv
 faces*.done
+faces*.hashes
 clusters*.csv
 labels*.csv
 image_people*.csv
