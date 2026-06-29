@@ -131,6 +131,26 @@ Optionally (`assign --folders`, off by default) also copy each image into
 `by_child/<name>/` for every labeled face it contains (a photo with 3 named kids
 lands in 3 folders). Originals by default, `--jpeg` optional.
 
+**Noise recovery is on by default.** HDBSCAN routes ~40% of faces to the noise
+bucket (`-1`) — many are real, just hard (profile, downturned, blurry, distant).
+`assign` pulls each noise/unlabeled face into its nearest *named* cluster when it
+clears `--recover-thresh` (0.45) **and** beats the runner-up by `--recover-margin`
+(0.05). This is the strict two-test rule in `match_to_centroids`: ambiguous faces
+(including unlabeled kids) stay out rather than get misassigned. Validated on this
+album — even the faces sitting exactly on the 0.45 floor were correct, just
+marginal photos, so the threshold is high-precision here. Recovery boosts recall
+materially (e.g. this album: ~3.4k faces, ~2.2k images gain a name). `--no-recover`
+restores strict named-clusters-only assignment.
+
+It is **on by default deliberately**: recovery isn't a stored property of
+`image_people.csv`, so a plain `assign` that *omitted* it would silently drop
+every recovered name on the next re-assign (e.g. after an import). Default-on
+makes the recall durable instead of a flag you must remember — same reasoning as
+the scene overrides above. The one caveat default-on inherits: recovery only
+compares against *named* clusters, so a genuinely unlabeled child can be pulled to
+the nearest known kid if they clear 0.45 — label new kids (re-`review`) rather
+than leaning on recovery to paper over missing clusters.
+
 ## Multi-person queries
 
 `image_people.csv` makes "who is in this photo" a set per image, so any

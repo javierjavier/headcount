@@ -2951,8 +2951,11 @@ def main() -> int:
                        help="also write per-child folders here (default dir: by_child/)")
     p_asg.add_argument("--names", default="", help="with --folders, only these names (comma list)")
     p_asg.add_argument("--copy", action="store_true", help="real copies instead of symlinks (uses disk)")
-    p_asg.add_argument("--recover", action="store_true",
-                       help="pull noise/junk faces into their nearest named cluster (boosts recall)")
+    p_asg.add_argument("--recover", action=argparse.BooleanOptionalAction, default=True,
+                       help="pull noise/junk faces into their nearest named cluster "
+                            "(boosts recall; on by default — strict thresh 0.45/margin 0.05 "
+                            "keeps it high-precision). Use --no-recover for strict "
+                            "named-clusters-only assignment.")
     p_asg.add_argument("--recover-thresh", type=float, default=0.45,
                        help="min similarity to a cluster centroid to recover (default: 0.45)")
     p_asg.add_argument("--recover-margin", type=float, default=0.05,

@@ -67,12 +67,13 @@ python faces.py review
 #    and any you don't know. Same kid split across two clusters? Same name.
 
 # 5. assign — who's in each photo -> image_people.csv (+ per-child counts).
-#    --recover pulls noise/profile faces into their nearest named cluster,
-#    lifting recall (~84%->97% for a well-photographed kid) at ~97% purity.
-#    --folders [dir] also sorts copies into by_child/<name>/ (opt-in, default
-#    off; a photo with 3 named kids lands in all 3 folders). --jpeg works here too.
-python faces.py assign --recover
-python faces.py assign --recover --folders     # also fan out into by_child/
+#    Noise recovery is ON by default: pulls noise/profile faces into their nearest
+#    named cluster, lifting recall (~84%->97% for a well-photographed kid) at ~97%
+#    purity. --no-recover for strict named-clusters-only. --folders [dir] also sorts
+#    copies into by_child/<name>/ (opt-in, default off; a photo with 3 named kids
+#    lands in all 3 folders). --jpeg works here too.
+python faces.py assign
+python faces.py assign --folders               # also fan out into by_child/
 
 # 6. query — copy any slice into query/<expr>/. Default is symlinks; --copy for
 #    real HEIC files; --jpeg to re-encode (most reliable Finder thumbnails, since
