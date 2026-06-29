@@ -1646,6 +1646,14 @@ SERVE_PAGE = """<!doctype html>
       <label><input type="checkbox" data-media="live" checked> live photos</label>
       <label><input type="checkbox" data-media="video" checked> videos</label>
     </div>
+    <h2 id="datehead">Date</h2>
+    <div class="rangewrap" id="datewrap">
+      <div class="track"></div>
+      <div class="fill" id="dfill"></div>
+      <input type="range" id="dmin" step="1">
+      <input type="range" id="dmax" step="1">
+    </div>
+    <div class="hourlab" id="datelab"></div>
     <h2 id="foldhead" class="toggle closed">Folder</h2>
     <div class="names" id="folders"></div>
     <h2>Preview size</h2>
@@ -1689,7 +1697,7 @@ SERVE_PAGE = """<!doctype html>
 
 <script>
 const DATA = __MANIFEST__;
-const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, scene:"", media:{photo:true, live:true, video:true}, foldersOff:new Set(), foldOpen:false, search:"", sort:"new", nsort:"az", cell:150 };
+const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, dmin:0, dmax:0, scene:"", media:{photo:true, live:true, video:true}, foldersOff:new Set(), foldOpen:false, search:"", sort:"new", nsort:"az", cell:150 };
 // album subfolders present in the data (""=album root). Stored as an *exclude*
 // set so the default (nothing excluded) shows everything and a freshly imported
 // subfolder is visible without clearing saved filters.
@@ -1705,6 +1713,14 @@ const hrs = DATA.items.map(i => i.h).filter(h => h !== null);
 const HMIN = hrs.length ? Math.min(...hrs) : 0, HMAX = hrs.length ? Math.max(...hrs) : 23;
 S.hmin = HMIN; S.hmax = HMAX;
 
+// distinct capture days present (ISO "YYYY-MM-DD", sorted ascending). The date
+// slider works on indices into this array; undated items (no dt) ignore it. We
+// persist the day *strings* (not indices) so saved filters survive new imports
+// shifting the index positions.
+const DAYS = [...new Set(DATA.items.map(i => i.dt ? i.dt.slice(0,10).replace(/:/g,"-") : "").filter(Boolean))].sort();
+const DMIN = 0, DMAX = DAYS.length ? DAYS.length - 1 : 0;
+S.dmin = DMIN; S.dmax = DMAX;
+
 // face-count bounds present in the data (items with a known count; videos/
 // uncounted photos are null and ignored here — they always pass the filter)
 const fcs = DATA.items.map(i => i.fc).filter(c => c !== null && c !== undefined);
@@ -1715,7 +1731,7 @@ S.fmin = FCMIN; S.fmax = FCMAX;
 const SKEY = "headcount.filters.v1";
 function saveState() {
   try { localStorage.setItem(SKEY, JSON.stringify({
-    names:[...S.names], mode:S.mode, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, scene:S.scene, media:S.media, foldersOff:[...S.foldersOff], foldOpen:S.foldOpen, sort:S.sort, nsort:S.nsort, cell:S.cell
+    names:[...S.names], mode:S.mode, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, dlo:DAYS[S.dmin] || "", dhi:DAYS[S.dmax] || "", scene:S.scene, media:S.media, foldersOff:[...S.foldersOff], foldOpen:S.foldOpen, sort:S.sort, nsort:S.nsort, cell:S.cell
   })); } catch (e) {}
 }
 function loadState() {
@@ -1730,6 +1746,9 @@ function loadState() {
   if (typeof v.hmin === "number") S.hmin = Math.min(Math.max(v.hmin, HMIN), HMAX);   // clamp to data bounds
   if (typeof v.hmax === "number") S.hmax = Math.min(Math.max(v.hmax, HMIN), HMAX);
   if (S.hmin > S.hmax) { S.hmin = HMIN; S.hmax = HMAX; }
+  if (typeof v.dlo === "string") { const i = DAYS.indexOf(v.dlo); if (i >= 0) S.dmin = i; }   // re-anchor by day
+  if (typeof v.dhi === "string") { const i = DAYS.indexOf(v.dhi); if (i >= 0) S.dmax = i; }
+  if (S.dmin > S.dmax) { S.dmin = DMIN; S.dmax = DMAX; }
   if (v.scene === "indoor" || v.scene === "outdoor") S.scene = v.scene;
   if (v.media && typeof v.media === "object") {
     for (const k of ["photo", "live", "video"]) if (typeof v.media[k] === "boolean") S.media[k] = v.media[k];
@@ -1778,6 +1797,10 @@ function matches(it) {
   }
   if (it.fc != null && (it.fc < S.fmin || it.fc > S.fmax)) return false; // uncounted item always passes
   if (it.h !== null && (it.h < S.hmin || it.h > S.hmax)) return false;   // unknown hour always passes
+  if (DAYS.length && it.dt) {                                            // undated item always passes
+    const d = it.dt.slice(0,10).replace(/:/g,"-");
+    if (d < DAYS[S.dmin] || d > DAYS[S.dmax]) return false;             // ISO days compare lexically
+  }
   if (S.scene && it.s && it.s !== S.scene) return false;                 // unknown scene always passes
 
   if (!S.media[mediaCat(it)]) return false;
@@ -1867,6 +1890,11 @@ function render() {
 function hourLabel() {
   $("hourlab").textContent = (S.hmin === HMIN && S.hmax === HMAX)
     ? "Any time" : (String(S.hmin).padStart(2,"0") + ":00 – " + String(S.hmax).padStart(2,"0") + ":59");
+}
+
+function dateLabel() {
+  $("datelab").textContent = (S.dmin === DMIN && S.dmax === DMAX)
+    ? "Any date" : (prettyDayShort(DAYS[S.dmin]) + " – " + prettyDayShort(DAYS[S.dmax]));
 }
 
 function faceLabel() {
@@ -1991,6 +2019,23 @@ function updFill() {
 }
 hmin.oninput = e => { S.hmin = Math.min(+e.target.value, S.hmax); e.target.value = S.hmin; hourLabel(); updFill(); render(); };
 hmax.oninput = e => { S.hmax = Math.max(+e.target.value, S.hmin); e.target.value = S.hmax; hourLabel(); updFill(); render(); };
+// dual range over distinct capture days (by index). Hidden when there's nothing
+// to filter on (0 or 1 distinct day), like the Faces slider.
+const dmin = $("dmin"), dmax = $("dmax");
+if (DAYS.length < 2) {
+  $("datehead").style.display = "none"; $("datewrap").style.display = "none"; $("datelab").style.display = "none";
+} else {
+  dmin.min = dmax.min = DMIN; dmin.max = dmax.max = DMAX;
+  dmin.value = S.dmin; dmax.value = S.dmax;
+  const updDFill = () => {
+    const span = Math.max(1, DMAX - DMIN);
+    $("dfill").style.left = (S.dmin - DMIN) / span * 100 + "%";
+    $("dfill").style.right = (DMAX - S.dmax) / span * 100 + "%";
+  };
+  dmin.oninput = e => { S.dmin = Math.min(+e.target.value, S.dmax); e.target.value = S.dmin; dateLabel(); updDFill(); render(); };
+  dmax.oninput = e => { S.dmax = Math.max(+e.target.value, S.dmin); e.target.value = S.dmax; dateLabel(); updDFill(); render(); };
+  dateLabel(); updDFill();
+}
 // dual range over the face-count bounds. Hidden when there's no spread to filter
 // on (no faces.csv, or every counted item has the same count).
 const fmin = $("fmin"), fmax = $("fmax");
