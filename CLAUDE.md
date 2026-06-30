@@ -23,8 +23,12 @@ validations). All are gitignored — keep it that way; never `git add -f` them.
 
 ## Conventions
 
-- Style: double-quoted, 4-space. Lint: `ruff check .` (rule set `F`/`E`/`W`,
-  `E501` ignored).
+- Style: double-quoted, 4-space. Lint: `ruff check .` (rule set `F`/`E`/`W` plus
+  `N999`, `E501` ignored). Ruff isn't installed as a binary here — run it via
+  `uvx ruff check .`. A tracked pre-commit hook (`.githooks/pre-commit`) runs
+  the same check and blocks the commit on failure; a fresh clone opts in once
+  with `git config core.hooksPath .githooks` (bypass a single commit with
+  `--no-verify`).
 - Tests: `pytest`, or `python tests/test_logic.py` (runs without pytest).
 - `embed` is the only slow step (~40 min for ~4.7k photos) and is the
   expensive-once stage — everything else is fast and re-runnable. Don't trigger

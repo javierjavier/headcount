@@ -1,0 +1,19 @@
+#!/bin/sh
+# Lint gate: blocks the commit if ruff finds issues.
+# Uses uvx (ruff is not installed as a standalone binary in this repo).
+# Bypass once with: git commit --no-verify
+#
+# Hooks live in .githooks/ (tracked) instead of .git/hooks/ (untracked) so the
+# gate is version-controlled. Each clone must opt in once:
+#     git config core.hooksPath .githooks
+
+if ! command -v uvx >/dev/null 2>&1; then
+    echo "pre-commit: uvx not found — skipping ruff (install uv to enable the lint gate)" >&2
+    exit 0
+fi
+
+echo "pre-commit: running ruff check ." >&2
+if ! uvx ruff check .; then
+    echo "pre-commit: ruff failed — commit blocked. Fix issues or use 'git commit --no-verify'." >&2
+    exit 1
+fi

@@ -7,6 +7,7 @@ select = [
     "F",      # Pyflakes (unused imports, undefined names, etc.)
     "E",      # pycodestyle errors
     "W",      # pycodestyle warnings
+    "N999",   # Invalid module name
 ]
 ignore = [
     "E501",   # Line too long — wrapping is a judgment call here
