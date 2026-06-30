@@ -86,6 +86,18 @@ python faces.py query --with ada,ben --jpeg   # browsable: reliable thumbnails
 python faces.py query --with ada --without ben
 python faces.py query --only ada,ben          # exactly those two
 
+#    Binning + precision (see DESIGN.md "Output binning"):
+#    --split-scene       -> indoor/ + outdoor/   (needs `scene`)
+#    --split-size        -> candid/ + large-group/ by detected-face count (--large-min, default 5)
+#    --recovered split   -> quarantine recovery-only matches in a recovered/ folder for review
+#    --recovered drop    -> exclude them entirely (max precision; folder gets __clustered)
+#
+#    Repeatable "give a parent every clean photo of their kid" export:
+python faces.py query --with ada --split-size --recovered split --copy --zip
+#    -> query/with_ada/{candid,large-group,recovered}/ + a .zip alongside.
+#    'recovered/' holds the lower-confidence matches to skim before sending; use
+#    --recovered drop to omit them, or keep (default) to mix them into the bins.
+
 # 6b. video — (optional) name the faces INSIDE album videos, using the labels you
 #    already filled in. Samples frames (default 1 fps), matches each face to your
 #    labeled clusters at the calibrated 0.35 threshold, and writes

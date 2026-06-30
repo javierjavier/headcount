@@ -168,6 +168,45 @@ into `query/<expr>/`:
 Derived analytics are cheap too — e.g. "who is Ada most often photographed with?"
 is just ranking co-occurrence counts against Ada's set.
 
+### Output binning: `--split-scene`, `--split-size`, `--confirmed-only`
+
+A `query` can fan its matches into subfolders instead of one flat directory.
+`--split-scene` buckets by `scene.csv` (indoor/outdoor). `--split-size` buckets
+by **detected-face count** — `candid/` (`< --large-min`, default 5) vs
+`large-group/` — for "a clean shot of my kid" vs "the whole-class photo". The two
+splits are mutually exclusive (one folder axis at a time).
+
+**`--split-size` counts faces *detected*, not kids *present*** — and that gap is
+real, not pedantic. A wide shot of eight toddlers where seven are hooded, turned
+away, or distant detects as *one* face and lands in `candid/`. We deliberately do
+**not** try to fix this: "how many children are physically in frame" needs
+person/head detection (a different model and dependency) for a cosmetic bucket,
+against this tool's stay-light ethos. For the same reason there is **no `solo`
+bin** — "1 detected face" is too unreliable a proxy for "alone" to label as such,
+so it folds into `candid`. The honest signal `--split-size` gives is "few clear
+faces" vs "a crowd", which is enough to separate keepers from class group shots.
+
+**`--recovered keep|drop|split`** governs photos where a target is present *only*
+via assign-time noise recovery — no **clustered** face. Recovery (on by default,
+~40% of faces) is where false positives concentrate: a low-res/profile face
+matched to a centroid. But it also restores many *genuine* faces, so excluding it
+outright is a real recall trade. Hence three policies:
+
+- **`keep`** (default) — treat a recovery match like any other. Max recall.
+- **`drop`** — exclude recovery-only photos. Max precision for a *shareable*
+  export, at the cost of true sightings that only survived as recovered noise.
+  Folder gets a `__clustered` suffix so it never clobbers a full run. The tag
+  names the *mechanism* (kept faces are clustered, not recovery-attached), **not**
+  a human correctness claim — deliberately neutral so it's safe on a shared
+  filename.
+- **`split`** — keep every photo but quarantine the recovery-only ones in a
+  `recovered/` subfolder (ahead of any scene/size split). **Nothing is lost and
+  nothing dubious is silently mixed in** — you skim `recovered/` and keep what's
+  real. This is the best of both for a hand-off: confident photos land in their
+  bins, the judgement-call pile is set aside for a human glance.
+
+`drop`/`split` read `--clusters` + `--labels` to know which faces are clustered.
+
 ### Caveat: AND queries have lower recall
 
 A photo qualifies for `--with Ada,Ben` only if *both* faces were detected,

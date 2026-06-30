@@ -63,6 +63,32 @@ def test_query_any_and_without():
     assert faces._query_match({"Ada", "Ben"}, {"Ada"}, set(), {"Ben"}, set()) is False
 
 
+# --- _confirmed_ok (--confirmed-only: positives must be clustered) -----------
+
+def test_confirmed_ok_with_requires_all_clustered():
+    # --with Ada,Ben: both must have a clustered (not recovery-only) face.
+    assert faces._confirmed_ok({"Ada", "Ben"}, {"Ada", "Ben"}, set(), set()) is True
+    # Ben present only via recovery (absent from clustered set) -> dropped.
+    assert faces._confirmed_ok({"Ada"}, {"Ada", "Ben"}, set(), set()) is False
+
+
+def test_confirmed_ok_any_needs_one_clustered():
+    assert faces._confirmed_ok({"Ada"}, set(), {"Ada", "Ben"}, set()) is True
+    assert faces._confirmed_ok({"Cleo"}, set(), {"Ada", "Ben"}, set()) is False
+
+
+def test_confirmed_ok_only_is_subset_not_exact():
+    # Unlike _query_match's --only, the clustered check is a subset test: other
+    # clustered kids in the frame are fine, the target just has to be real.
+    assert faces._confirmed_ok({"Ada", "Ben"}, set(), set(), {"Ada"}) is True
+    assert faces._confirmed_ok({"Ben"}, set(), set(), {"Ada"}) is False
+
+
+def test_confirmed_ok_empty_targets_pass():
+    # No positive targets (e.g. --without only) -> nothing to confirm.
+    assert faces._confirmed_ok(set(), set(), set(), set()) is True
+
+
 # --- _name_set / _parse_hours ----------------------------------------------
 
 def test_name_set_strips_and_drops_empties():

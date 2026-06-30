@@ -1373,6 +1373,23 @@ def _query_match(names: set, want: set, any_of: set, without: set, only: set) ->
     return True
 
 
+def _confirmed_ok(clustered: set, want: set, any_of: set, only: set) -> bool:
+    """Whether a photo's *clustered* names satisfy the query's positive targets.
+
+    Used by `--confirmed-only` to drop recovery-only attachments: the target must
+    have a real clustered face, not merely a recovery-attached name. Mirrors the
+    positive half of `_query_match` (--without is intentionally not re-checked
+    here; exclusion stays on full presence). Pure set logic so it's unit-testable.
+    """
+    if want and not want <= clustered:
+        return False
+    if any_of and not (clustered & any_of):
+        return False
+    if only and not only <= clustered:
+        return False
+    return True
+
+
 def _export_one(src: Path, fn: str, dstdir: Path, args) -> None:
     """Materialize one source image into *dstdir* per the query's output mode.
 
@@ -1407,6 +1424,8 @@ def _export_one(src: Path, fn: str, dstdir: Path, args) -> None:
 
 
 def cmd_query(args) -> int:
+    from collections import Counter, defaultdict
+
     ip = Path(args.image_people)
     if not ip.exists():
         print(f"{ip} not found — run `assign` first.", file=sys.stderr)
@@ -1440,6 +1459,9 @@ def cmd_query(args) -> int:
     if args.where and args.split_scene:
         print("Use either --where or --split-scene, not both.", file=sys.stderr)
         return 1
+    if args.split_scene and args.split_size:
+        print("Use either --split-scene or --split-size, not both.", file=sys.stderr)
+        return 1
     scene_of = None
     if args.where or args.split_scene:
         scene_path = Path(args.scene)
@@ -1450,10 +1472,59 @@ def cmd_query(args) -> int:
         scene_of = {r["filename"]: r["scene"] for r in read_face_rows(scene_path)}
     where_ok = {fn for fn, sc in scene_of.items() if sc == args.where} if args.where else None
 
+    # Detected-face count per image, for --split-size. Counted off faces.csv (the
+    # same embed run image_people derives from), so every matched photo is covered;
+    # a photo with no face rows is count 0 and falls in candid/.
+    faces_per_img = None
+    if args.split_size:
+        faces_path = Path(args.faces)
+        if not faces_path.exists():
+            print(f"{faces_path} not found — run `embed` first (or drop --split-size).",
+                  file=sys.stderr)
+            return 1
+        faces_per_img = Counter(r["filename"] for r in read_face_rows(faces_path))
+
+    # For --recovered drop/split: the set of names with a *clustered* face in each
+    # image (face_id -> cluster_id -> name). A name present only via assign-time
+    # noise recovery has no clustered face here — that's the recovery-only shape we
+    # drop (precision) or quarantine into recovered/ (no recall lost).
+    clustered_names = None
+    if args.recovered != "keep":
+        clu_path, lab_path, faces_path = Path(args.clusters), Path(args.labels), Path(args.faces)
+        missing_files = [p for p in (clu_path, lab_path, faces_path) if not p.exists()]
+        if missing_files:
+            print(f"--recovered {args.recovered} needs " + ", ".join(str(p) for p in missing_files)
+                  + " — run `cluster`/`review`/`embed` first.", file=sys.stderr)
+            return 1
+        cluster_name = {
+            int(r["cluster_id"]): nm
+            for r in read_face_rows(lab_path)
+            if (nm := (r.get("name") or "").strip())
+        }
+        file_of = {r["face_id"]: r["filename"] for r in read_face_rows(faces_path)}
+        clustered_names = defaultdict(set)
+        for r in read_face_rows(clu_path):
+            nm = cluster_name.get(int(r["cluster_id"]))
+            if nm and (fn := file_of.get(r["face_id"])):
+                clustered_names[fn].add(nm)
+
     name_matched = [
         fn for fn, names in data.items()
         if _query_match(names, want, any_of, without, only)
     ]
+    # Classify each match as confident (positive target is clustered) vs
+    # recovery-only, then either drop or quarantine the latter. --without is left
+    # on full presence: to exclude someone, their being there at all excludes,
+    # clustered or not.
+    recovered_set: set = set()
+    if clustered_names is not None:
+        recovered_set = {
+            fn for fn in name_matched
+            if not _confirmed_ok(clustered_names.get(fn, set()), want, any_of, only)
+        }
+        if args.recovered == "drop":
+            name_matched = [fn for fn in name_matched if fn not in recovered_set]
+            recovered_set = set()
     # Guard against a stale scene.csv. If a scene split/filter is requested but
     # some matched photos aren't in it (typically a new import that `scene` hasn't
     # processed yet), refuse loudly rather than quietly dropping them (--where) or
@@ -1490,6 +1561,13 @@ def cmd_query(args) -> int:
         label += "__not_" + "_".join(sorted(without))
     if args.where:
         label += "__" + args.where
+    if args.recovered == "drop":
+        # Contents differ from a non-dropped run, so use a distinct folder rather
+        # than clobber it (same reasoning as --where's suffix). 'split' keeps the
+        # same photo set (just sub-foldered), so it needs no suffix. The tag names
+        # the *mechanism* (kept faces are clustered, not recovery-attached) — it is
+        # NOT a human correctness claim, so it's safe on a shared filename.
+        label += "__clustered"
 
     print(f"{len(selected)} image(s) match {label}")
     if not selected:
@@ -1520,17 +1598,29 @@ def cmd_query(args) -> int:
 
     n = 0
     unscored = 0
+    size_bins: Counter = Counter()
     for fn in selected:
         src = (album / fn).resolve()
         if not src.exists():
             continue
-        if args.split_scene:
+        if fn in recovered_set:
+            # --recovered split: quarantine recovery-only matches in one folder for
+            # review, ahead of (and instead of) the scene/size split.
+            dstdir = out / "recovered"
+        elif args.split_scene:
             # Route into out/<scene>/. Reachable with a missing scene row only
             # under --allow-unscored (the pre-flight check aborts otherwise);
             # those land in out/unscored/ rather than vanish.
             sub = scene_of.get(fn)
             unscored += sub is None
             dstdir = out / (sub or "unscored")
+        elif args.split_size:
+            # Route by detected-face count. Note: "candid" means few *faces
+            # detected*, which is not the same as few kids present (turned-away
+            # kids don't count) — a deliberate, documented limitation.
+            sub = "large-group" if faces_per_img.get(fn, 0) >= args.large_min else "candid"
+            size_bins[sub] += 1
+            dstdir = out / sub
         else:
             dstdir = out
         try:
@@ -1542,6 +1632,11 @@ def cmd_query(args) -> int:
     print(f"Wrote {n} {kind} -> {out}/")
     if unscored:
         print(f"  ({unscored} had no scene tag -> {out}/unscored/)")
+    if args.split_size:
+        print(f"  (candid {size_bins['candid']}, large-group {size_bins['large-group']} "
+              f"at >={args.large_min} faces)")
+    if recovered_set:
+        print(f"  ({len(recovered_set)} recovery-only -> {out}/recovered/ for review)")
 
     if args.zip:
         import zipfile
@@ -2979,6 +3074,26 @@ def main() -> int:
                             "matches (else the query aborts on a stale scene.csv); untagged photos "
                             "go to unscored/")
     p_qry.add_argument("--scene", default="scene.csv", help="scene index from `scene`")
+    p_qry.add_argument("--split-size", action="store_true",
+                       help="fan matches into candid/ (<--large-min faces) and large-group/ "
+                            "subfolders by detected-face count (mutually exclusive with --split-scene). "
+                            "NB: face count is faces *detected*, not kids present -- a wide shot of "
+                            "turned-away kids can read as few faces; see DESIGN.md.")
+    p_qry.add_argument("--large-min", type=int, default=5,
+                       help="with --split-size, faces >= this go to large-group/ (default: 5)")
+    p_qry.add_argument("--recovered", choices=["keep", "drop", "split"], default="keep",
+                       help="how to handle photos where a --with/--any/--only target is present only "
+                            "via assign-time noise recovery (no *clustered* face) -- the main "
+                            "false-positive source. keep=treat like any match (default); drop=exclude "
+                            "them for max precision (folder gets __clustered); split=route them into a "
+                            "recovered/ subfolder for separate review (no recall lost). drop/split read "
+                            "--clusters + --labels.")
+    p_qry.add_argument("--faces", default="faces.csv",
+                       help="face table from `embed` (for --split-size counts)")
+    p_qry.add_argument("--clusters", default="clusters.csv",
+                       help="cluster assignment from `cluster` (for --confirmed-only)")
+    p_qry.add_argument("--labels", default="labels.csv",
+                       help="cluster names from `review` (for --confirmed-only)")
     p_qry.add_argument("--out", default="query", help="output base folder (default: query/)")
     p_qry.add_argument("--copy", action="store_true", help="real HEIC copies instead of symlinks")
     p_qry.add_argument("--jpeg", action="store_true",
