@@ -22,7 +22,7 @@ Phases:
           type a name per cluster; that's the actual tagging step.
 
   assign  From the filled-in labels.csv, compute who is in each photo ->
-          image_people.csv, and optionally sort copies/symlinks into by_child/.
+          image_people.csv, and optionally sort copies into by_child/.
 
   query   Set queries over image_people.csv, e.g. `--with Ada,Ben` (both
           present), `--any`, `--without`, `--only`, into query/<expr>/.
@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import re
 import shutil
 import sys
 from collections import deque
@@ -56,9 +57,11 @@ from pathlib import Path
 import numpy as np
 
 from common import (
+    WORK,
     ArchiveFoundError,
     build_face_app,
     empty_hint,
+    ensure_work_dir,
     list_images,
     list_videos,
     load_image_bgr,
@@ -192,7 +195,7 @@ def _recover_desync(faces_csv: Path, emb_path: Path, done_path: Path) -> bool:
 
     # Rewrite faces.csv to header + first `keep` rows.
     with faces_csv.open("w", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(FACES_HEADER)
         for r in rows[:keep]:
             w.writerow([r[c] for c in FACES_HEADER])
@@ -316,7 +319,7 @@ def cmd_embed(args) -> int:
                 for k, hh in zip(backfill, ex.map(lambda k: _file_hash(key_to_path[k]), backfill)):
                     recorded[k] = hh
             with hash_path.open("a", newline="") as hf:
-                w = csv.writer(hf)
+                w = csv.writer(hf, lineterminator="\n")
                 for k in backfill:
                     w.writerow([k, recorded[k]])
         for k, hh in recorded.items():
@@ -376,8 +379,8 @@ def cmd_embed(args) -> int:
     # consults), while zero-face images still get marked processed.
     with faces_csv.open("a", newline="") as cf, emb_path.open("ab") as ef, \
             done_path.open("a") as df, hash_path.open("a", newline="") as hf:
-        writer = csv.writer(cf)
-        hash_writer = csv.writer(hf)
+        writer = csv.writer(cf, lineterminator="\n")
+        hash_writer = csv.writer(hf, lineterminator="\n")
         if new_csv:
             writer.writerow(FACES_HEADER)
         # Record skipped duplicates as processed up front so a crash mid-run
@@ -504,6 +507,10 @@ def cmd_cluster(args) -> int:
             min_cluster_size=args.min_cluster_size,
             min_samples=(args.min_samples or None),
             metric="euclidean",
+            # astype() below already hands HDBSCAN a fresh array, so letting it
+            # work in place is safe; saying so silences sklearn's warning that the
+            # default flips to copy=True in 1.10.
+            copy=False,
         ).fit_predict(X.astype(np.float64))
         params = f"hdbscan min_cluster_size={args.min_cluster_size}"
     else:
@@ -529,7 +536,7 @@ def cmd_cluster(args) -> int:
         shutil.copy2(out, backup)
         print(f"Backed up prior {out} -> {backup} (lets `review` remap labels by face_id).")
     with out.open("w", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(["face_id", "cluster_id"])
         for r, c in zip(rows, full):
             w.writerow([r["face_id"], int(c)])
@@ -727,7 +734,11 @@ def cmd_review(args) -> int:
     # robust to renumbering — and report the vote purity so any uncertain remap is
     # visible. Falls back to by-id only on a first run with no backup.
     labels_path = Path(args.labels)
-    prior_names = _read_labels(labels_path)
+    try:
+        prior_names = _read_labels(labels_path)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
     remap = None
     if prior_names:
         from common import _unique_path
@@ -754,8 +765,8 @@ def cmd_review(args) -> int:
     report = []  # (cid, name, purity|None) for the carried-forward summary
     kept = set()  # montage filenames written this run, to sweep stale ones below
     with labels_path.open("w", newline="") as lf:
-        w = csv.writer(lf)
-        w.writerow(["cluster_id", "size", "montage", "name"])
+        w = csv.writer(lf, lineterminator="\n")
+        w.writerow(["montage", "name"])
         for rank, (cid, fr) in enumerate(ranked):
             thumbs = crops.get(cid)
             if not thumbs:
@@ -768,7 +779,7 @@ def cmd_review(args) -> int:
                 name, purity, _ = remap.get(cid, ("", None, 0))
             else:
                 name, purity = prior_names.get(cid, ""), None
-            w.writerow([cid, len(fr), montage, name])
+            w.writerow([montage, name])
             report.append((cid, name, purity))
             written += 1
 
@@ -1000,7 +1011,7 @@ def cmd_scene(args) -> int:
     else:
         final_rows = new_rows
     with out.open("w", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(header)
         w.writerows(final_rows)
 
@@ -1024,22 +1035,38 @@ def cmd_scene(args) -> int:
     return 0
 
 
+_MONTAGE_CLUSTER = re.compile(r"__cluster(\d+)__")
+
+
 def _read_labels(path: Path) -> dict[int, str]:
-    """cluster_id -> name from labels.csv, skipping rows with no name typed in."""
+    """cluster_id -> name from labels.csv, skipping rows with no name typed in.
+
+    labels.csv is `montage,name`; the cluster id is read from the montage filename
+    `review` wrote (c00__cluster22__n209.jpg -> 22), so the file a person edits has
+    only the two columns they need. The old `cluster_id,size,montage,name` layout
+    still works: a `cluster_id` column wins when present. A named row whose id
+    can't be found raises ValueError rather than silently dropping that name.
+    """
     out: dict[int, str] = {}
     for r in read_face_rows(path):
         name = (r.get("name") or "").strip()
         if not name:
             continue
-        try:
-            out[int(r["cluster_id"])] = name
-        except (KeyError, ValueError):
-            continue
+        cid = (r.get("cluster_id") or "").strip()
+        if not cid:
+            m = _MONTAGE_CLUSTER.search(r.get("montage") or "")
+            if not m:
+                raise ValueError(
+                    f"{path}: can't tell which cluster {name!r} is for — its montage "
+                    f"{r.get('montage')!r} should be a filename from clusters/, like "
+                    f"c00__cluster22__n209.jpg. Fix that row and try again.")
+            cid = m.group(1)
+        out[int(cid)] = name
     return out
 
 
-def _materialize(filenames, name: str, album: Path, base: Path, copy: bool) -> int:
-    """Put each file under base/name/ as a symlink (default) or real copy."""
+def _materialize(filenames, name: str, album: Path, base: Path) -> int:
+    """Copy each file into base/name/."""
     from common import _unique_path
 
     d = base / name
@@ -1054,10 +1081,7 @@ def _materialize(filenames, name: str, album: Path, base: Path, copy: bool) -> i
         # between subfolders (e.g. two reused IMG_4492.HEIC).
         dst = _unique_path(d / Path(fn).name)
         try:
-            if copy:
-                shutil.copy2(src, dst)
-            else:
-                dst.symlink_to(src)
+            shutil.copy2(src, dst)
             n += 1
         except Exception as e:  # noqa: BLE001
             print(f"  ! {fn} -> {name}: {e}")
@@ -1130,7 +1154,11 @@ def cmd_assign(args) -> int:
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
-    labels = _read_labels(Path(args.labels))
+    try:
+        labels = _read_labels(Path(args.labels))
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
     if not labels:
         print(f"No names filled into {args.labels} yet — run `review`, then type names.",
               file=sys.stderr)
@@ -1190,7 +1218,7 @@ def cmd_assign(args) -> int:
 
     out_csv = Path(args.out)
     with out_csv.open("w", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(["filename", "names"])
         for fn in sorted(images):
             w.writerow([fn, ";".join(sorted(img_names.get(fn, ())))])
@@ -1212,10 +1240,9 @@ def cmd_assign(args) -> int:
                 if names_filter and name not in names_filter:
                     continue
                 per_name.setdefault(name, []).append(fn)
-        kind = "copies" if args.copy else "symlinks"
-        print(f"\nWriting {kind} into {base}/<name>/ ...")
+        print(f"\nCopying into {base}/<name>/ ...")
         for name, fns in sorted(per_name.items()):
-            n = _materialize(fns, name, Path(args.album), base, args.copy)
+            n = _materialize(fns, name, Path(args.album), base)
             print(f"  {name}/: {n}")
     return 0
 
@@ -1231,7 +1258,7 @@ def _write_video_people(out_csv: Path, results: dict[str, list]) -> None:
     row persisted, which is what makes resume lossless.
     """
     with out_csv.open("w", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(VIDEO_PEOPLE_HEADER)
         for fn in sorted(results):
             w.writerow(results[fn])
@@ -1265,7 +1292,11 @@ def cmd_video(args) -> int:
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
-    labels = _read_labels(Path(args.labels))
+    try:
+        labels = _read_labels(Path(args.labels))
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
     if not labels:
         print(f"No names in {args.labels} — run `review`/`assign` first, then label.",
               file=sys.stderr)
@@ -1417,10 +1448,8 @@ def _export_one(src: Path, fn: str, dstdir: Path, args) -> None:
         if exif:
             save_kw["exif"] = exif
         img.save(dst, "JPEG", **save_kw)
-    elif args.copy:
-        shutil.copy2(src, _unique_path(dstdir / Path(fn).name))
     else:
-        (_unique_path(dstdir / Path(fn).name)).symlink_to(src)
+        shutil.copy2(src, _unique_path(dstdir / Path(fn).name))
 
 
 def cmd_query(args) -> int:
@@ -1499,11 +1528,11 @@ def cmd_query(args) -> int:
             print(f"--recovered {args.recovered} needs " + ", ".join(str(p) for p in missing_files)
                   + " — run `cluster`/`review`/`embed` first.", file=sys.stderr)
             return 1
-        cluster_name = {
-            int(r["cluster_id"]): nm
-            for r in read_face_rows(lab_path)
-            if (nm := (r.get("name") or "").strip())
-        }
+        try:
+            cluster_name = _read_labels(lab_path)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 1
         file_of = {r["face_id"]: r["filename"] for r in read_face_rows(faces_path)}
         clustered_names = defaultdict(set)
         for r in read_face_rows(clu_path):
@@ -1583,7 +1612,7 @@ def cmd_query(args) -> int:
         return 0
 
     # query results go directly in out/<label>/ (not nested under a name like
-    # by_child/), so we copy/symlink here rather than reuse _materialize.
+    # by_child/), so we copy here rather than reuse _materialize.
     #
     # Wipe-and-rewrite: out/<label>/ is named for this exact query, so it should
     # *be* its result set, not an append log. query is the fast re-runnable
@@ -1632,7 +1661,7 @@ def cmd_query(args) -> int:
             n += 1
         except Exception as e:  # noqa: BLE001 - one bad file shouldn't abort the query
             print(f"  ! {fn}: {e}")
-    kind = "jpegs" if args.jpeg else ("copies" if args.copy else "symlinks")
+    kind = "jpegs" if args.jpeg else "copies"
     print(f"Wrote {n} {kind} -> {out}/")
     if unscored:
         print(f"  ({unscored} had no scene tag -> {out}/unscored/)")
@@ -1646,8 +1675,7 @@ def cmd_query(args) -> int:
         import zipfile
 
         # Pack the materialized folder into a sibling <label>.zip, preserving the
-        # split-scene subfolders. is_file() follows symlinks, so symlinked results
-        # are stored as real content -- a zip is self-contained by definition.
+        # split-scene subfolders.
         zpath = out.with_name(out.name + ".zip")
         if zpath.exists():
             zpath.unlink()
@@ -1668,6 +1696,52 @@ FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <circle cx="20.5" cy="13.5" r="4.6" fill="#fff"/>
   <path d="M12 27.5c0-4.7 3.8-8.5 8.5-8.5s8.5 3.8 8.5 8.5z" fill="#fff"/>
 </svg>"""
+
+# Shown while `serve` builds its caches in the background (first run: one HEIC
+# decode per photo, minutes on a big album). Polls /status and reloads into the
+# gallery when it's ready, so the browser never sits on a dead URL.
+SERVE_PREPARING_PAGE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>headcount</title>
+<link rel="icon" href="/favicon.svg">
+<style>
+  body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#16181d; color:#e7e9ee;
+         display:flex; align-items:center; justify-content:center; min-height:100vh; }
+  .box { width:min(420px, calc(100vw - 32px)); }
+  h1 { font-size:18px; margin:0 0 6px; }
+  p { color:#9aa3b2; margin:0 0 14px; }
+  .bar { height:6px; background:#2c313b; border-radius:3px; overflow:hidden; }
+  .bar div { height:100%; width:0; background:#5b9dff; transition:width .3s; }
+  #step { margin-top:10px; font-variant-numeric:tabular-nums; }
+  .err { color:#ff8a8a; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>Preparing the gallery</h1>
+  <p>The first run makes a thumbnail of every photo. Later runs reuse them and start right away.</p>
+  <div class="bar"><div id="fill"></div></div>
+  <div id="step">Starting…</div>
+</div>
+<script>
+async function poll() {
+  let s;
+  try { s = await (await fetch("/status", {cache: "no-store"})).json(); }
+  catch (e) { setTimeout(poll, 2000); return; }
+  if (s.ready) { location.reload(); return; }
+  const step = document.getElementById("step");
+  if (s.error) { step.className = "err"; step.textContent = s.error; return; }
+  step.textContent = s.step + (s.total ? ": " + s.done + " / " + s.total : "…");
+  document.getElementById("fill").style.width = (s.total ? 100 * s.done / s.total : 0) + "%";
+  setTimeout(poll, 1000);
+}
+poll();
+</script>
+</body>
+</html>"""
 
 SERVE_PAGE = """<!doctype html>
 <html lang="en">
@@ -1944,6 +2018,15 @@ function loadState() {
 }
 loadState();
 
+// Filters carried over from an earlier visit get their own lead in the Filtering
+// bar, so a narrowed grid on arrival has an obvious cause. sessionStorage survives
+// reloads (chip removal reloads) but not a new tab/visit, which is the distinction.
+let fromLastVisit = false;
+try {
+  fromLastVisit = !sessionStorage.getItem("headcount.visit");
+  sessionStorage.setItem("headcount.visit", "1");
+} catch (e) {}
+
 const $ = id => document.getElementById(id);
 const dayOf = it => it.dt ? it.dt.slice(0,10).replace(/:/g,"-") : "";        // "2026-06-11" or ""
 function prettyDay(d) {
@@ -2012,22 +2095,48 @@ const warmIO = ("IntersectionObserver" in window) ? new IntersectionObserver((en
   for (const e of entries) if (e.isIntersecting) { warm(e.target.dataset.k); warmIO.unobserve(e.target); }
 }, { rootMargin: "300px" }) : null;
 
-// active name filters shown above the count, each removable; plus "Clear all"
+// every active filter shown above the count, each removable; plus "Clear all".
+// Listing only names here once hid sidebar filters restored from a past visit, so
+// "Filtering: rio" showed 9 of rio's 160 items with no hint why.
+function activeFilters() {
+  const out = [];                                          // [label, clear-fn, reloads?]
+  for (const n of [...S.names].sort()) out.push([n, () => { S.names.delete(n); }, false]);
+  const pad = h => String(h).padStart(2, "0");
+  if (S.hmin !== HMIN || S.hmax !== HMAX)
+    out.push([pad(S.hmin) + ":00 – " + pad(S.hmax) + ":59", () => { S.hmin = HMIN; S.hmax = HMAX; }, true]);
+  if (S.dmin !== DMIN || S.dmax !== DMAX)
+    out.push([prettyDayShort(DAYS[S.dmin]) + " – " + prettyDayShort(DAYS[S.dmax]), () => { S.dmin = DMIN; S.dmax = DMAX; }, true]);
+  if (S.fmin !== FCMIN || S.fmax !== FCMAX)
+    out.push([S.fmin === S.fmax ? S.fmin + (S.fmin === 1 ? " face" : " faces") : S.fmin + " – " + S.fmax + " faces",
+              () => { S.fmin = FCMIN; S.fmax = FCMAX; }, true]);
+  if (S.scene) out.push([S.scene, () => { S.scene = ""; }, true]);
+  const hidden = [["photo", "photos"], ["live", "live photos"], ["video", "videos"]].filter(([k]) => !S.media[k]);
+  if (hidden.length)
+    out.push(["no " + hidden.map(([, l]) => l).join(", "), () => { S.media = { photo:true, live:true, video:true }; }, true]);
+  if (S.foldersOff.size)
+    out.push([S.foldersOff.size + (S.foldersOff.size === 1 ? " folder" : " folders") + " hidden", () => { S.foldersOff = new Set(); }, true]);
+  if (S.collapsedDays.size)
+    out.push([S.collapsedDays.size + (S.collapsedDays.size === 1 ? " day" : " days") + " collapsed", () => { S.collapsedDays = new Set(); }, false]);
+  return out;
+}
+
 function renderActive() {
   const box = $("active"); box.innerHTML = "";
-  const names = [...S.names].sort();
-  if (!names.length) return;                                   // :empty hides the row
-  const lead = document.createElement("span"); lead.className = "lead"; lead.textContent = "Filtering:";
+  const active = activeFilters();
+  if (!active.length) return;                                  // :empty hides the row
+  const lead = document.createElement("span"); lead.className = "lead";
+  lead.textContent = fromLastVisit ? "Restored from your last visit:" : "Filtering:";
   box.appendChild(lead);
-  for (const n of names) {
+  for (const [label, clear, reloads] of active) {
     const chip = document.createElement("span"); chip.className = "chip";
-    chip.append(document.createTextNode(n));
-    const x = document.createElement("button"); x.type = "button"; x.textContent = "\\u00d7"; x.title = "Remove " + n;
-    x.onclick = () => { S.names.delete(n); buildNames(); render(); };
+    chip.append(document.createTextNode(label));
+    const x = document.createElement("button"); x.type = "button"; x.textContent = "\\u00d7"; x.title = "Remove " + label;
+    // sidebar sliders/checkboxes re-init from state on load, same as resetFilters
+    x.onclick = () => { clear(); if (reloads) { saveState(); location.reload(); } else { buildNames(); render(); } };
     chip.appendChild(x); box.appendChild(chip);
   }
   const clr = document.createElement("button"); clr.type = "button"; clr.className = "clear"; clr.textContent = "Clear all";
-  clr.onclick = () => { S.names.clear(); buildNames(); render(); };
+  clr.onclick = resetFilters;
   box.appendChild(clr);
 }
 
@@ -2057,7 +2166,10 @@ function resetFilters() {
 }
 
 let current = [];
+let rendered = false;
 function render() {
+  if (rendered) fromLastVisit = false;                     // any change after load is this visit's
+  rendered = true;
   saveState();
   renderActive();
   updateNameCounts(); updateFolderCounts();   // facet counts track the live filter set
@@ -2571,7 +2683,7 @@ def assign_thumb_keys(filenames: list[str]) -> dict[str, str]:
     return keys
 
 
-def _build_thumbs(items, album, cache, size, workers):
+def _build_thumbs(items, album, cache, size, workers, progress=None):
     """Pre-render a square-ish JPEG thumbnail per item into *cache* (idempotent).
 
     HEIC decode is the slow part, so we cache by key and skip ones already done
@@ -2627,6 +2739,8 @@ def _build_thumbs(items, album, cache, size, workers):
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         for _ in ex.map(one, todo):
             done += 1
+            if progress:
+                progress(done, len(todo))
             if done % 200 == 0:
                 print(f"  {done}/{len(todo)}")
     print(f"  done ({len(todo)} built).")
@@ -2763,66 +2877,86 @@ def cmd_serve(args) -> int:
     # subdir so _build_thumbs's `*.jpg` stale-sweep never touches them.
     pcache = cache / "preview"
     pcache.mkdir(exist_ok=True)
-    _build_thumbs(items, album, cache, args.thumb, args.prefetch)
+    # The caches below are slow on a first run (a HEIC decode per photo), so they
+    # build in a background thread while the server is already up: until
+    # state["page"] is set, / shows SERVE_PREPARING_PAGE, which polls /status.
+    state: dict = {"step": "Starting", "done": 0, "total": 0, "page": None, "error": None}
 
-    # Capture-date sidecar for sort + date grouping. Re-reading EXIF for every
-    # photo each launch is slow, so cache filename -> datetime in the thumb cache
-    # and only extract ones we haven't recorded yet.
-    dates_path = cache / "dates.json"
-    dates = _load_json_cache(dates_path)
-    missing = [it for it in items if it["f"] not in dates]
-    if missing:
-        print(f"Reading capture dates for {len(missing)} item(s) ...")
+    def prepare():
+        state["step"] = "Making thumbnails"
+        _build_thumbs(items, album, cache, args.thumb, args.prefetch,
+                      progress=lambda d, t: state.update(done=d, total=t))
 
-        def _read_dt(it):
-            p = album / it["f"]
-            return it["f"], (_video_dt(p) if it["v"] else _exif_dt(p))
+        # Capture-date sidecar for sort + date grouping. Re-reading EXIF for every
+        # photo each launch is slow, so cache filename -> datetime in the thumb cache
+        # and only extract ones we haven't recorded yet.
+        dates_path = cache / "dates.json"
+        dates = _load_json_cache(dates_path)
+        missing = [it for it in items if it["f"] not in dates]
+        if missing:
+            print(f"Reading capture dates for {len(missing)} item(s) ...")
+            state.update(step="Reading capture dates", done=0, total=0)
 
-        with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
-            for fn, dt in ex.map(_read_dt, missing):
-                dates[fn] = dt
-        dates_path.write_text(json.dumps(dates))
-    for it in items:
-        it["dt"] = dates.get(it["f"], "")
-        # Videos have no scene.csv hour; derive it from the capture time so the
-        # time-of-day filter applies to them just like photos.
-        if it["v"] and it["dt"]:
-            h = _hour_from_dt(it["dt"])
-            if h >= 0:
-                it["h"] = h
-        # ...then tag the video indoor/outdoor by that hour (see hour_scene above).
-        if it["v"] and not it["s"] and it["h"] is not None:
-            it["s"] = hour_scene.get(it["h"], "")
+            def _read_dt(it):
+                p = album / it["f"]
+                return it["f"], (_video_dt(p) if it["v"] else _exif_dt(p))
 
-    # Video durations (seconds) for the grid length badge — ffprobe once, cached
-    # in the same way as dates. Only videos need it.
-    durs_path = cache / "durations.json"
-    durs = _load_json_cache(durs_path)
-    miss_d = [it for it in items if it["v"] and it["f"] not in durs]
-    if miss_d:
-        print(f"Reading durations for {len(miss_d)} video(s) ...")
-        with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
-            for fn, d in ex.map(lambda it: (it["f"], _video_duration(album / it["f"])), miss_d):
-                durs[fn] = d
-        durs_path.write_text(json.dumps(durs))
-    for it in items:
-        it["d"] = float(durs.get(it["f"], 0.0)) if it["v"] else 0.0
+            with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
+                for fn, dt in ex.map(_read_dt, missing):
+                    dates[fn] = dt
+            dates_path.write_text(json.dumps(dates))
+        for it in items:
+            it["dt"] = dates.get(it["f"], "")
+            # Videos have no scene.csv hour; derive it from the capture time so the
+            # time-of-day filter applies to them just like photos.
+            if it["v"] and it["dt"]:
+                h = _hour_from_dt(it["dt"])
+                if h >= 0:
+                    it["h"] = h
+            # ...then tag the video indoor/outdoor by that hour (see hour_scene above).
+            if it["v"] and not it["s"] and it["h"] is not None:
+                it["s"] = hour_scene.get(it["h"], "")
 
-    all_names = sorted({n for it in items for n in it["n"]})
-    # Album-relative parent dir of each item (POSIX, see rel_key) — drives the
-    # gallery's per-subfolder filter. Files sitting directly in album/ have no
-    # subfolder; "" groups them together (labelled "album root" client-side).
-    def _subfolder(fn: str) -> str:
-        return fn.rsplit("/", 1)[0] if "/" in fn else ""
+        # Video durations (seconds) for the grid length badge — ffprobe once, cached
+        # in the same way as dates. Only videos need it.
+        durs_path = cache / "durations.json"
+        durs = _load_json_cache(durs_path)
+        miss_d = [it for it in items if it["v"] and it["f"] not in durs]
+        if miss_d:
+            print(f"Reading durations for {len(miss_d)} video(s) ...")
+            state.update(step="Reading video lengths", done=0, total=0)
+            with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
+                for fn, d in ex.map(lambda it: (it["f"], _video_duration(album / it["f"])), miss_d):
+                    durs[fn] = d
+            durs_path.write_text(json.dumps(durs))
+        for it in items:
+            it["d"] = float(durs.get(it["f"], 0.0)) if it["v"] else 0.0
 
-    all_folders = sorted({_subfolder(it["f"]) for it in items})
-    manifest = {"names": all_names, "folders": all_folders, "liveMax": args.live_max,
-                "items": [{"k": it["k"], "n": it["n"], "fc": it["fc"],
-                           "h": it["h"], "s": it["s"], "sf": _subfolder(it["f"]),
-                           "dt": it["dt"], "v": 1 if it["v"] else 0,
-                           "d": round(it["d"], 1) if it["v"] else 0}
-                          for it in items]}
-    page = SERVE_PAGE.replace("__MANIFEST__", json.dumps(manifest))
+        all_names = sorted({n for it in items for n in it["n"]})
+        # Album-relative parent dir of each item (POSIX, see rel_key) — drives the
+        # gallery's per-subfolder filter. Files sitting directly in album/ have no
+        # subfolder; "" groups them together (labelled "album root" client-side).
+        def _subfolder(fn: str) -> str:
+            return fn.rsplit("/", 1)[0] if "/" in fn else ""
+
+        all_folders = sorted({_subfolder(it["f"]) for it in items})
+        manifest = {"names": all_names, "folders": all_folders, "liveMax": args.live_max,
+                    "items": [{"k": it["k"], "n": it["n"], "fc": it["fc"],
+                               "h": it["h"], "s": it["s"], "sf": _subfolder(it["f"]),
+                               "dt": it["dt"], "v": 1 if it["v"] else 0,
+                               "d": round(it["d"], 1) if it["v"] else 0}
+                              for it in items]}
+        state["page"] = SERVE_PAGE.replace("__MANIFEST__", json.dumps(manifest))
+        n_vid = sum(1 for it in items if it["v"])
+        summary = f"{len(items) - n_vid} photos" + (f", {n_vid} videos" if n_vid else "")
+        print(f"\n  gallery ready: {summary}, {len(all_names)} names\n")
+
+    def prepare_or_report():
+        try:
+            prepare()
+        except Exception as e:  # noqa: BLE001 — surface it in the browser, not just the terminal
+            state["error"] = f"Preparing the gallery failed: {e!r}\nSee the terminal for details."
+            raise
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet: no per-request console spam
@@ -2880,11 +3014,20 @@ def cmd_serve(args) -> int:
             from urllib.parse import unquote, urlparse
             parts = urlparse(self.path)
             path, query = unquote(parts.path), parts.query
-            if path == "/":
-                self._send(200, page.encode(), "text/html; charset=utf-8")
+            if path == "/status":
+                st = {"ready": state["page"] is not None, "step": state["step"],
+                      "done": state["done"], "total": state["total"], "error": state["error"]}
+                self._send(200, json.dumps(st).encode(), "application/json",
+                           {"Cache-Control": "no-store"})
+            elif path == "/":
+                body = state["page"] or SERVE_PREPARING_PAGE
+                self._send(200, body.encode(), "text/html; charset=utf-8",
+                           {"Cache-Control": "no-store"})
             elif path == "/favicon.svg":
                 self._send(200, FAVICON_SVG.encode(), "image/svg+xml",
                            {"Cache-Control": "max-age=86400"})
+            elif state["page"] is None:
+                self._send(503, b"gallery is still preparing", "text/plain")
             elif path.startswith("/thumb/"):
                 it = by_key.get(path[len("/thumb/"):])
                 f = cache / f"{it['k']}.jpg" if it else None
@@ -2929,6 +3072,9 @@ def cmd_serve(args) -> int:
             from urllib.parse import urlparse
             if urlparse(self.path).path != "/export":
                 self._send(404, b"not found", "text/plain")
+                return
+            if state["page"] is None:
+                self._send(503, b"gallery is still preparing", "text/plain")
                 return
             try:
                 length = int(self.headers.get("Content-Length", 0))
@@ -2977,10 +3123,8 @@ def cmd_serve(args) -> int:
 
     httpd = Server((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
-    n_vid = sum(1 for it in items if it["v"])
-    summary = f"{len(items) - n_vid} photos" + (f", {n_vid} videos" if n_vid else "")
-    print(f"\n  headcount browsing {summary}, {len(all_names)} names")
-    print(f"  serving at {url}  (Ctrl-C to stop)\n")
+    print(f"\n  serving at {url}  (Ctrl-C to stop)\n")
+    threading.Thread(target=prepare_or_report, daemon=True).start()
     if not args.no_open:
         webbrowser.open(url)
     try:
@@ -3000,7 +3144,7 @@ def main() -> int:
 
     p_emb = sub.add_parser("embed", help="detect+embed every face -> faces.csv/.npy (slow, once)")
     p_emb.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_emb.add_argument("--faces", default="faces.csv", help="face table output (default: faces.csv)")
+    p_emb.add_argument("--faces", default=f"{WORK}/faces.csv", help="face table output (default: work/faces.csv)")
     p_emb.add_argument("--det-size", type=int, default=1024, help="detector input size (default: 1024)")
     p_emb.add_argument("--det-thresh", type=float, default=0.4, help="detector confidence (default: 0.4)")
     p_emb.add_argument("--prefetch", type=int, default=2,
@@ -3012,8 +3156,8 @@ def main() -> int:
     p_emb.set_defaults(func=cmd_embed)
 
     p_clu = sub.add_parser("cluster", help="group faces by identity -> clusters.csv (re-runnable)")
-    p_clu.add_argument("--faces", default="faces.csv", help="face table (default: faces.csv)")
-    p_clu.add_argument("--out", default="clusters.csv", help="cluster assignment output")
+    p_clu.add_argument("--faces", default=f"{WORK}/faces.csv", help="face table (default: work/faces.csv)")
+    p_clu.add_argument("--out", default=f"{WORK}/clusters.csv", help="cluster assignment output")
     p_clu.add_argument("--algo", choices=["hdbscan", "dbscan"], default="hdbscan",
                        help="clustering algorithm (default: hdbscan; dbscan for small/dense sets)")
     p_clu.add_argument("--min-cluster-size", type=int, default=15,
@@ -3024,16 +3168,16 @@ def main() -> int:
                        help="core-point neighbours; 0=auto (default)")
     p_clu.add_argument("--min-size", type=int, default=40, help="pre-filter: min bbox side in px (default: 40)")
     p_clu.add_argument("--min-det", type=float, default=0.5, help="pre-filter: min det_score (default: 0.5)")
-    p_clu.add_argument("--refs", default="reference_embeddings.npy", help="enrolled refs for calibration readout")
+    p_clu.add_argument("--refs", default=f"{WORK}/reference_embeddings.npy", help="enrolled refs for calibration readout")
     p_clu.add_argument("--ref-thresh", type=float, default=0.35, help="sim>= this counts as the reference person")
     p_clu.set_defaults(func=cmd_cluster)
 
     p_rev = sub.add_parser("review", help="montage each cluster + skeleton labels.csv to name them")
     p_rev.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_rev.add_argument("--faces", default="faces.csv", help="face table (default: faces.csv)")
-    p_rev.add_argument("--clusters", default="clusters.csv", help="cluster assignment (default: clusters.csv)")
-    p_rev.add_argument("--out", default="clusters", help="montage output folder (default: clusters/)")
-    p_rev.add_argument("--labels", default="labels.csv", help="skeleton label file to fill in")
+    p_rev.add_argument("--faces", default=f"{WORK}/faces.csv", help="face table (default: work/faces.csv)")
+    p_rev.add_argument("--clusters", default=f"{WORK}/clusters.csv", help="cluster assignment (default: work/clusters.csv)")
+    p_rev.add_argument("--out", default=f"{WORK}/clusters", help="montage output folder (default: work/clusters/)")
+    p_rev.add_argument("--labels", default=f"{WORK}/labels.csv", help="skeleton label file to fill in")
     p_rev.add_argument("--per-cluster", type=int, default=25, help="faces shown per montage (default: 25)")
     p_rev.add_argument("--cols", type=int, default=5, help="montage grid columns (default: 5)")
     p_rev.add_argument("--thumb", type=int, default=110, help="thumbnail px per face (default: 110)")
@@ -3042,14 +3186,13 @@ def main() -> int:
 
     p_asg = sub.add_parser("assign", help="labels.csv -> image_people.csv (+ optional by_child/ folders)")
     p_asg.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_asg.add_argument("--faces", default="faces.csv", help="face table (default: faces.csv)")
-    p_asg.add_argument("--clusters", default="clusters.csv", help="cluster assignment (default: clusters.csv)")
-    p_asg.add_argument("--labels", default="labels.csv", help="filled-in labels (default: labels.csv)")
-    p_asg.add_argument("--out", default="image_people.csv", help="who-is-in-each-photo index")
+    p_asg.add_argument("--faces", default=f"{WORK}/faces.csv", help="face table (default: work/faces.csv)")
+    p_asg.add_argument("--clusters", default=f"{WORK}/clusters.csv", help="cluster assignment (default: work/clusters.csv)")
+    p_asg.add_argument("--labels", default=f"{WORK}/labels.csv", help="filled-in labels (default: work/labels.csv)")
+    p_asg.add_argument("--out", default=f"{WORK}/image_people.csv", help="who-is-in-each-photo index")
     p_asg.add_argument("--folders", nargs="?", const="by_child", default="",
-                       help="also write per-child folders here (default dir: by_child/)")
+                       help="also copy each child's photos into folders here (default dir: by_child/)")
     p_asg.add_argument("--names", default="", help="with --folders, only these names (comma list)")
-    p_asg.add_argument("--copy", action="store_true", help="real copies instead of symlinks (uses disk)")
     p_asg.add_argument("--recover", action=argparse.BooleanOptionalAction, default=True,
                        help="pull noise/junk faces into their nearest named cluster "
                             "(boosts recall; on by default — strict thresh 0.45/margin 0.05 "
@@ -3063,7 +3206,7 @@ def main() -> int:
 
     p_qry = sub.add_parser("query", help="set queries over image_people.csv (e.g. --with Ada,Ben)")
     p_qry.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_qry.add_argument("--image-people", default="image_people.csv", help="index from `assign`")
+    p_qry.add_argument("--image-people", default=f"{WORK}/image_people.csv", help="index from `assign`")
     p_qry.add_argument("--with", dest="with_", default="", help="all of these present (comma list)")
     p_qry.add_argument("--any", default="", help="at least one of these present")
     p_qry.add_argument("--without", default="", help="none of these present")
@@ -3077,7 +3220,7 @@ def main() -> int:
                        help="with --where/--split-scene, proceed even if scene.csv is missing some "
                             "matches (else the query aborts on a stale scene.csv); untagged photos "
                             "go to unscored/")
-    p_qry.add_argument("--scene", default="scene.csv", help="scene index from `scene`")
+    p_qry.add_argument("--scene", default=f"{WORK}/scene.csv", help="scene index from `scene`")
     p_qry.add_argument("--split-size", action="store_true",
                        help="fan matches into candid/ (<--large-min faces) and large-group/ "
                             "subfolders by detected-face count (mutually exclusive with --split-scene). "
@@ -3092,14 +3235,13 @@ def main() -> int:
                             "them for max precision (folder gets __clustered); split=route them into a "
                             "recovered/ subfolder for separate review (no recall lost). drop/split read "
                             "--clusters + --labels.")
-    p_qry.add_argument("--faces", default="faces.csv",
+    p_qry.add_argument("--faces", default=f"{WORK}/faces.csv",
                        help="face table from `embed` (for --split-size counts)")
-    p_qry.add_argument("--clusters", default="clusters.csv",
+    p_qry.add_argument("--clusters", default=f"{WORK}/clusters.csv",
                        help="cluster assignment from `cluster` (for --confirmed-only)")
-    p_qry.add_argument("--labels", default="labels.csv",
+    p_qry.add_argument("--labels", default=f"{WORK}/labels.csv",
                        help="cluster names from `review` (for --confirmed-only)")
     p_qry.add_argument("--out", default="query", help="output base folder (default: query/)")
-    p_qry.add_argument("--copy", action="store_true", help="real HEIC copies instead of symlinks")
     p_qry.add_argument("--jpeg", action="store_true",
                        help="re-encode to JPEG (reliable Finder thumbnails; HEIC ones are flaky)")
     p_qry.add_argument("--max-size", type=int, default=0,
@@ -3114,14 +3256,14 @@ def main() -> int:
 
     p_scn = sub.add_parser("scene", help="tag each photo indoor/outdoor (foliage+sky) -> scene.csv")
     p_scn.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_scn.add_argument("--faces", default="faces.csv", help="limit to images in this face table ('' = all)")
-    p_scn.add_argument("--out", default="scene.csv", help="scene index output (default: scene.csv)")
+    p_scn.add_argument("--faces", default=f"{WORK}/faces.csv", help="limit to images in this face table ('' = all)")
+    p_scn.add_argument("--out", default=f"{WORK}/scene.csv", help="scene index output (default: work/scene.csv)")
     p_scn.add_argument("--method", choices=["green", "time", "both"], default="time",
                        help="time=hour window (default; instant, no decode, best when the "
                             "daily schedule is rigid), green=foliage/sky colour, both=AND")
     p_scn.add_argument("--outdoor-hours", default="10-11",
                        help="outdoor hour window for time/both, e.g. 10-11 (default: 10-11)")
-    p_scn.add_argument("--overrides", default="scene_overrides.csv",
+    p_scn.add_argument("--overrides", default=f"{WORK}/scene_overrides.csv",
                        help="per-folder scene overrides (CSV: subdir,scene) applied "
                             "after classification; forces off-schedule folders (e.g. a "
                             "4pm graduation) to a fixed tag that survives full re-runs")
@@ -3139,10 +3281,10 @@ def main() -> int:
     p_vid = sub.add_parser("video",
                            help="detect + name faces in album videos -> video_people.csv (uses existing labels)")
     p_vid.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_vid.add_argument("--faces", default="faces.csv", help="face table (default: faces.csv)")
-    p_vid.add_argument("--clusters", default="clusters.csv", help="cluster assignment (default: clusters.csv)")
-    p_vid.add_argument("--labels", default="labels.csv", help="filled-in labels (default: labels.csv)")
-    p_vid.add_argument("--out", default="video_people.csv", help="who-is-in-each-video index")
+    p_vid.add_argument("--faces", default=f"{WORK}/faces.csv", help="face table (default: work/faces.csv)")
+    p_vid.add_argument("--clusters", default=f"{WORK}/clusters.csv", help="cluster assignment (default: work/clusters.csv)")
+    p_vid.add_argument("--labels", default=f"{WORK}/labels.csv", help="filled-in labels (default: work/labels.csv)")
+    p_vid.add_argument("--out", default=f"{WORK}/video_people.csv", help="who-is-in-each-video index")
     p_vid.add_argument("--fps", type=float, default=1.0,
                        help="frames sampled per second of video (default: 1.0)")
     p_vid.add_argument("--max-frames", type=int, default=0,
@@ -3161,13 +3303,13 @@ def main() -> int:
 
     p_srv = sub.add_parser("serve", help="local web browser: name/time filters + zip export (localhost only)")
     p_srv.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_srv.add_argument("--image-people", default="image_people.csv", help="index from `assign`")
-    p_srv.add_argument("--faces", default="faces.csv",
+    p_srv.add_argument("--image-people", default=f"{WORK}/image_people.csv", help="index from `assign`")
+    p_srv.add_argument("--faces", default=f"{WORK}/faces.csv",
                        help="face index from `embed` — powers the face-count filter (optional)")
-    p_srv.add_argument("--scene", default="scene.csv", help="scene/hour index from `scene` (optional)")
-    p_srv.add_argument("--video-people", default="video_people.csv",
+    p_srv.add_argument("--scene", default=f"{WORK}/scene.csv", help="scene/hour index from `scene` (optional)")
+    p_srv.add_argument("--video-people", default=f"{WORK}/video_people.csv",
                        help="per-video name index from `video` (optional)")
-    p_srv.add_argument("--cache", default=".serve_cache", help="thumbnail cache dir (default: .serve_cache/)")
+    p_srv.add_argument("--cache", default=f"{WORK}/serve_cache", help="thumbnail cache dir (default: work/serve_cache/)")
     p_srv.add_argument("--thumb", type=int, default=768, help="thumbnail long edge in px (default: 768)")
     p_srv.add_argument("--prefetch", type=int, default=4, help="background decode threads for thumbs (default: 4)")
     p_srv.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1 — localhost only)")
@@ -3181,6 +3323,8 @@ def main() -> int:
     p_srv.set_defaults(func=cmd_serve)
 
     args = ap.parse_args()
+    for moved in ensure_work_dir():
+        print(f"moved {moved}")
 
     if getattr(args, "rescan", False):
         faces_csv = Path(args.faces)

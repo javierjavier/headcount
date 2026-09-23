@@ -230,7 +230,7 @@ an alternative to fanning copies into Finder folders with `query`. It binds
 `127.0.0.1` only — the same local-only privacy stance as everything else.
 
 **Thumbnail size (`--thumb`, default 768) is deliberate — don't drop it back to
-320.** Previews are pre-rendered into `.serve_cache/` once (re-decoding each HEIC
+320.** Previews are pre-rendered into `work/serve_cache/` once (re-decoding each HEIC
 is the slow part; everything else is instant). The blur trap: the grid lays out
 square cells with `object-fit: cover`, which scales the image to fill by its
 *short* edge, and HiDPI/Retina screens render ~2× the CSS pixels. So a cell shown
@@ -240,7 +240,7 @@ landscape shot) is already below that at the *default* zoom, so it upscales and
 looks soft. 768px long-edge (~576px short edge) covers the largest cell at 2×.
 The tradeoff is build time and disk (~5–6× vs 320); raise/lower to taste.
 
-The cache is **size-aware**: it records the build size in a `.serve_cache/.thumb_size`
+The cache is **size-aware**: it records the build size in a `work/serve_cache/.thumb_size`
 marker and clears + rebuilds when `--thumb` changes. Without this the per-key
 `exists()` skip would silently keep serving whatever size was built first — a
 smaller value later looks fine, a larger one stays blurry, with no signal why.
@@ -261,7 +261,7 @@ Three things needed handling that photos didn't:
   `ffmpeg` (seek ~1s in to skip black intros). ffmpeg is treated as an *optional
   system tool*, not a new pip dependency — missing it degrades to a film-strip
   placeholder tile rather than dropping the video, keeping the pure-pip install
-  story intact. Posters cache in `.serve_cache/` next to photo thumbs, so the
+  story intact. Posters cache in `work/serve_cache/` next to photo thumbs, so the
   existing size-aware sweep and orphan-prune cover them for free.
 - **Capture time.** Photos read EXIF; videos have none. `_video_dt` reads the
   container `creation_time` via `ffprobe` and converts it from UTC (how iPhone

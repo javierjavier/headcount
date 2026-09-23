@@ -11,13 +11,25 @@ All face data is biometric and stays local — nothing is committed or uploaded.
 
 ## Setup
 
+You need a C/C++ compiler: `insightface` ships only as source, so pip builds it
+during install. On macOS, install the Xcode Command Line Tools once:
+
+```bash
+xcode-select --install
+```
+
+Then:
+
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
 On first run, insightface downloads the `buffalo_l` model (~300 MB) into
-`~/.insightface/models/`. Everything runs on **CPU** — no GPU needed.
+`~/.insightface/models/`. Everything runs on **CPU** — no GPU needed. The first
+`embed` also prints "Matplotlib is building the font cache" and a download
+progress bar before it starts on your photos; on a slow connection that step
+can take a few minutes.
 
 The codebase was built around an album that happens to be Apple **HEIC**, but the pipeline accepts any format
 Pillow can read (`.jpg`, `.png`, `.webp`, `.tiff`, …) — nothing downstream
@@ -34,10 +46,16 @@ album/       # [PUT THE FULL SET OF PHOTOS HERE]
              #   archive left in album/ is a hard error — unzip into a subfolder.
 reference/   # optional: a few clear photos of one known child, used only for
              #   cold-start cluster calibration (see enroll below)
-clusters/    # created by `review` — one montage per cluster, for labeling
+work/        # created on first run — everything the tool generates from the
+             #   album: face data, montages (work/clusters/), work/labels.csv,
+             #   the gallery's thumbnail cache. Delete it with album/ to remove
+             #   every trace of the photos.
 by_child/    # created by `assign --folders` (opt-in) — one folder per named child
 query/       # created by `query` — the slices you pull out
 ```
+
+Checkouts from before `work/` existed kept these files at the top level; the
+first run moves them into `work/` and prints what it moved.
 
 ## Workflow (`faces.py`)
 
@@ -62,22 +80,22 @@ python faces.py cluster
 # 3. review — montage each cluster into clusters/ + write a skeleton labels.csv
 python faces.py review
 
-# 4. label — open clusters/ (Finder Quick Look), then type a name per cluster
-#    into the 'name' column of labels.csv. Skip the junk cluster (backs of heads)
-#    and any you don't know. Same kid split across two clusters? Same name.
+# 4. label — name each cluster in labels.csv. See "Labeling" below the workflow.
+open work/clusters                             # look at the montages
+open -e work/labels.csv                        # edit in TextEdit, not Numbers
 
 # 5. assign — who's in each photo -> image_people.csv (+ per-child counts).
 #    Noise recovery is ON by default: pulls noise/profile faces into their nearest
 #    named cluster, lifting recall (~84%->97% for a well-photographed kid) at ~97%
 #    purity. --no-recover for strict named-clusters-only. --folders [dir] also sorts
 #    copies into by_child/<name>/ (opt-in, default off; a photo with 3 named kids
-#    lands in all 3 folders). --jpeg works here too.
+#    lands in all 3 folders).
 python faces.py assign
 python faces.py assign --folders               # also fan out into by_child/
 
-# 6. query — copy any slice into query/<expr>/. Default is symlinks; --copy for
-#    real HEIC files; --jpeg to re-encode (most reliable Finder thumbnails, since
-#    macOS thumbnails HEIC unreliably even as real copies). --jpeg also takes
+# 6. query — copy any slice into query/<expr>/ as the original files; --jpeg to
+#    re-encode (most reliable Finder thumbnails, since macOS thumbnails HEIC
+#    unreliably). --jpeg also takes
 #    --max-size N to downscale and --strip-exif to drop metadata.
 #    Each query/<expr>/ dir is wiped and rewritten per run, so it always reflects
 #    the current query.
@@ -93,7 +111,7 @@ python faces.py query --only ada,ben          # exactly those two
 #    --recovered drop    -> exclude them entirely (max precision; folder gets __clustered)
 #
 #    Repeatable "give a parent every clean photo of their kid" export:
-python faces.py query --with ada --split-size --recovered split --copy --zip
+python faces.py query --with ada --split-size --recovered split --zip
 #    -> query/with_ada/{candid,large-group,recovered}/ + a .zip alongside.
 #    'recovered/' holds the lower-confidence matches to skim before sending; use
 #    --recovered drop to omit them, or keep (default) to mix them into the bins.
@@ -110,8 +128,9 @@ python faces.py video --fps 2 --limit 20       # denser sampling; first 20 clips
 # 7. serve — browse the whole album in a localhost-only web gallery instead of
 #    Finder: name + time-of-day filters, a preview-size slider, and zip export
 #    (originals, or re-encoded 2048px JPEGs). Nothing leaves the machine; it
-#    binds 127.0.0.1 only. First run builds a thumbnail cache (.serve_cache/),
-#    which is the slow part (re-decodes each HEIC); later runs reuse it.
+#    binds 127.0.0.1 only. First run builds a thumbnail cache (work/serve_cache/),
+#    which is the slow part (re-decodes each HEIC); the browser opens right away
+#    and shows progress, then loads the gallery. Later runs reuse the cache.
 #    Videos in album/ also appear in the grid (play inline in the lightbox);
 #    toggle them with the Media checkboxes (photos/live photos/videos), or hide
 #    all videos with --no-videos.
@@ -120,12 +139,59 @@ python faces.py serve --thumb 1024             # sharper previews (see note)
 python faces.py serve --no-videos              # photos only
 ```
 
-Previews come from `.serve_cache/` thumbnails built at `--thumb` long-edge
+### Labeling (step 4)
+
+`cluster` sorts every face into groups it thinks are the same person. `review`
+then writes one montage per group into `work/clusters/`: a 5×5 grid of up to 25 face
+crops from that group. The filename tells you which group it is:
+
+```
+c00__cluster22__n209.jpg
+ │       │        └─ 209 faces in this group
+ │       └─ cluster id 22
+ └─ rank 00 = biggest group (montages are sorted biggest first)
+```
+
+`work/labels.csv` has one row per montage: the montage filename, then a comma. Look
+at each montage and type a name after the comma of its row:
+
+```
+montage,name
+c00__cluster22__n209.jpg,
+c01__cluster20__n188.jpg,ada
+```
+
+Don't rename the montages or edit the filenames in `labels.csv`: the cluster id
+in the filename is how the tool knows which faces a name belongs to.
+
+- **One child** → their name.
+- **Same child as another montage** → the same name again. One child is often
+  split across two groups.
+- **Mixed children, adults you don't need, blurry or turned-away faces** → leave
+  blank. Blank rows are ignored.
+
+One group, often the biggest (so often `c00`), collects blurry, turned-away and
+partly hidden faces. They look more like each other than like any one child.
+That's normal: leave it blank.
+
+Names are matched exactly, including capitalization, so use one short spelling
+per child (`ada`, not `Ada` in one row and `ada` in another). A name with a space
+has to be quoted on the command line (`--with "ada b"`), so single words are
+easier.
+
+On a Mac, double-clicking `labels.csv` opens it in Numbers, which tries to save
+it as a `.numbers` file. Use `open -e work/labels.csv` to edit it in TextEdit instead,
+and save with ⌘S. You don't need to name every montage; name the children you
+care about, save, and run `python faces.py assign`.
+
+### Gallery (`serve`)
+
+Previews come from `work/serve_cache/` thumbnails built at `--thumb` long-edge
 (default 768). The grid fills cells by the photo's *short* edge and HiDPI/Retina
 screens want ~2× the CSS pixels, so a too-small thumb upscales and looks blurry —
 raise `--thumb` for crisper previews at the cost of build time and disk; lower it
 to save both. Changing the size rebuilds the cache automatically (it records the
-build size and clears stale thumbs); no manual `rm -rf .serve_cache` needed.
+build size and clears stale thumbs); no manual `rm -rf work/serve_cache` needed.
 
 #### Videos in the gallery
 
@@ -197,6 +263,10 @@ python faces.py scene --method time --outdoor-hours 10-11   # -> scene.csv
 python faces.py query --with ada --where outdoor
 ```
 
+`--outdoor-hours` counts whole clock hours and includes both ends: `10-11` means
+10:00–11:59. So an outdoor block from 10am to noon is `--outdoor-hours 10-11`,
+not `10-12` (which would also tag 12:00–12:59).
+
 `scene` rewrites the whole `scene.csv` with one outdoor-hours rule. If a later
 import's outdoor block differs from earlier batches (different day, different
 schedule), re-tagging everything would mis-tag the old batches. Use `--subdir` to
@@ -261,6 +331,26 @@ archive — rather than silently skipping every photo packed inside it. The face
 pipeline ignores videos and other non-image files; videos do, however, show up in
 the `serve` gallery (see *Videos in the gallery* above).
 
+## When you're done
+
+There are two ways to get photos out:
+
+- **`query`** for exports you want to repeat the same way, e.g. one folder per
+  child: `python faces.py query --with ada --zip`.
+- **`serve`** to browse and filter, then **Export zip** (originals, or 2048px
+  JPEGs). The zip downloads through your browser.
+
+Deleting `album/` does not delete the face data: face embeddings, montages, names
+and thumbnails of every child are in `work/`. To delete all of it but keep the
+install for next time:
+
+```bash
+rm -rf work album reference
+```
+
+Your exports in `query/` and `by_child/` are photos of the children too. Delete
+them once you've copied out what you need.
+
 ## Files
 
 | File                      | Purpose                                            |
@@ -270,6 +360,7 @@ the `serve` gallery (see *Videos in the gallery* above).
 | `common.py`               | Shared HEIC/EXIF loading, model setup, small utilities |
 | `requirements.txt`        | Dependencies                                       |
 | `DESIGN.md`               | Pipeline rationale, tradeoffs, hard cases          |
+| `work/`                   | Everything below marked *generated*, plus montages and the thumbnail cache |
 | `reference_embeddings.npy`| Enrolled calibration anchor (generated)            |
 | `faces.csv` / `faces.npy` | Every face's metadata + embedding (generated)      |
 | `faces.done`              | filenames already embedded, incl. zero-face images, for resume (generated) |

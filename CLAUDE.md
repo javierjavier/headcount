@@ -9,9 +9,11 @@ deliberate and explained there.
 ## Privacy invariant (non-negotiable)
 
 All face data is biometric, and the album is a child's photos. **Never commit**
-`album/`, `reference/`, `matches/`, or any generated artifact (`faces.*`,
-`clusters*`, `labels*`, `image_people*`, `scene*`, `query*/`, `*.jpg`
-validations). All are gitignored — keep it that way; never `git add -f` them.
+`album/`, `reference/`, `matches/`, `work/` (every generated artifact: `faces.*`,
+`clusters*`, `labels*`, `image_people*`, `scene*`, the serve cache), or exports
+(`query*/`, `by_child*/`). All are gitignored — keep it that way; never
+`git add -f` them. New generated files go in `work/` (`common.WORK`), not the
+top level.
 
 ## Layout
 

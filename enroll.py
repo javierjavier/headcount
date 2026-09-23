@@ -26,13 +26,22 @@ import sys
 
 import numpy as np
 
-from common import ArchiveFoundError, build_face_app, empty_hint, largest_face, list_images, load_image_bgr
+from common import (
+    WORK,
+    ArchiveFoundError,
+    build_face_app,
+    empty_hint,
+    ensure_work_dir,
+    largest_face,
+    list_images,
+    load_image_bgr,
+)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reference", default="reference", help="folder of reference photos (default: reference/)")
-    ap.add_argument("--out", default="reference_embeddings.npy", help="output .npy path")
+    ap.add_argument("--out", default=f"{WORK}/reference_embeddings.npy", help="output .npy path")
     # Reference photos are close-up crops where the face fills much of the frame.
     # A large det_size upscales such faces past the detector's anchors and misses
     # them, so enrollment defaults small (640). The album scan uses a larger size
@@ -40,6 +49,8 @@ def main() -> int:
     ap.add_argument("--det-size", type=int, default=640, help="detector input size (default: 640)")
     ap.add_argument("--det-thresh", type=float, default=0.4, help="detector confidence threshold (default: 0.4)")
     args = ap.parse_args()
+    for moved in ensure_work_dir():
+        print(f"moved {moved}")
 
     try:
         images = list_images(args.reference)

@@ -10,6 +10,7 @@ Centralizes what enroll.py and faces.py both need:
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +33,46 @@ VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
 # Archive extensions worth flagging: a common first-run mistake is dropping the
 # downloaded album archive into the folder without extracting it.
 ARCHIVE_EXTS = {".zip", ".tar", ".gz", ".tgz", ".7z", ".rar"}
+
+
+# Everything the tool generates from the album (face data, montages, labels, the
+# gallery's thumbnail cache) lives in this one folder, so deleting it and album/
+# removes every trace. Exports the user takes away (query/, by_child/) stay at
+# the top level.
+WORK = "work"
+
+# Files and folders earlier versions wrote at the top level, by default name.
+# ensure_work_dir moves them (and their review/cluster .bak copies) into WORK.
+_OLD_TOP_LEVEL = (
+    "faces.csv", "faces.npy", "faces.emb", "faces.done", "faces.hashes",
+    "clusters.csv", "labels.csv", "image_people.csv", "scene.csv",
+    "scene_overrides.csv", "video_people.csv", "video_people.done",
+    "reference_embeddings.npy", "clusters",
+)
+
+
+def ensure_work_dir(root: str | Path = ".") -> list[str]:
+    """Create WORK under *root*, first moving an older top-level layout into it.
+
+    Only runs the move when WORK doesn't exist yet, so it happens once and never
+    shuffles files the user put in WORK themselves. Returns what moved, as
+    "old -> new" strings, for the caller to print.
+    """
+    root = Path(root)
+    work = root / WORK
+    if work.exists():
+        return []
+    moves: dict[Path, Path] = {}   # keyed by source: `clusters*.bak` also matches clusters.csv.bak
+    for name in _OLD_TOP_LEVEL:
+        for p in [root / name, *sorted(root.glob(f"{name}*.bak"))]:
+            if p.exists():
+                moves[p] = work / p.name
+    if (root / ".serve_cache").is_dir():
+        moves[root / ".serve_cache"] = work / "serve_cache"
+    work.mkdir()
+    for src, dst in moves.items():
+        src.rename(dst)
+    return [f"{s.relative_to(root)} -> {d.relative_to(root)}" for s, d in moves.items()]
 
 
 class ArchiveFoundError(Exception):
@@ -194,6 +235,13 @@ def build_face_app(det_size: int = 1024, det_thresh: float = 0.4, modules=("dete
         embedding). Skipping the landmark and gender/age models is faster and
         leaves embeddings/scores identical. Pass None to load everything.
     """
+    # insightface 0.7.3 (the last release) calls scikit-image's deprecated
+    # SimilarityTransform.estimate during face alignment. The warning is about the
+    # dependency, not us, and `video` repeats it once per clip over the progress
+    # bar, so hide just that one.
+    warnings.filterwarnings("ignore", message="`estimate` is deprecated",
+                            category=FutureWarning, module="insightface")
+
     # Imported lazily so `--help` and arg errors don't pay the import cost.
     from insightface.app import FaceAnalysis
 

@@ -381,13 +381,81 @@ def test_recover_unmarks_reembedded_file_in_manifest(tmp_path):
 
 # --- _read_labels ----------------------------------------------------------
 
+def _write_labels(path, header, rows):
+    with path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
+
+
 def test_read_labels_skips_blank_names(tmp_path):
     lp = tmp_path / "labels.csv"
-    with lp.open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["cluster_id", "size", "montage", "name"])
-        w.writerows([["5", "100", "c00.jpg", "Ada"], ["6", "80", "c01.jpg", ""]])
+    _write_labels(lp, ["montage", "name"],
+                  [["c00__cluster22__n209.jpg", ""], ["c01__cluster5__n100.jpg", "Ada"]])
     assert faces._read_labels(lp) == {5: "Ada"}
+
+
+def test_read_labels_old_four_column_format(tmp_path):
+    lp = tmp_path / "labels.csv"
+    _write_labels(lp, ["cluster_id", "size", "montage", "name"],
+                  [["5", "100", "c00.jpg", "Ada"], ["6", "80", "c01.jpg", ""]])
+    assert faces._read_labels(lp) == {5: "Ada"}
+
+
+def test_read_labels_bad_montage_on_named_row_raises(tmp_path):
+    lp = tmp_path / "labels.csv"
+    _write_labels(lp, ["montage", "name"],
+                  [["c00__cluster22__n209.jpg", ""], ["c01.jpg", "Ada"]])
+    try:
+        faces._read_labels(lp)
+    except ValueError as e:
+        assert "Ada" in str(e) and "c01.jpg" in str(e)
+    else:
+        raise AssertionError("expected ValueError for a named row with no cluster id")
+
+
+def test_read_labels_bad_montage_on_blank_row_is_ignored(tmp_path):
+    lp = tmp_path / "labels.csv"
+    _write_labels(lp, ["montage", "name"],
+                  [["garbled", ""], ["c01__cluster5__n100.jpg", "Ada"]])
+    assert faces._read_labels(lp) == {5: "Ada"}
+
+
+# --- ensure_work_dir (moving the old top-level layout into work/) ----------
+
+def test_ensure_work_dir_moves_old_layout(tmp_path):
+    for n in ["faces.csv", "faces.npy", "clusters.csv", "clusters.csv.bak", "labels.csv",
+              "labels.csv.bak", "labels.csv_1.bak", "image_people.csv", "faces.py"]:
+        (tmp_path / n).write_text(n)
+    for d in ["clusters", ".serve_cache", "album", "query"]:
+        (tmp_path / d).mkdir()
+    (tmp_path / "clusters" / "c00__cluster1__n5.jpg").write_bytes(b"x")
+
+    moved = common.ensure_work_dir(tmp_path)
+
+    work = tmp_path / "work"
+    assert "labels.csv -> work/labels.csv" in moved
+    assert ".serve_cache -> work/serve_cache" in moved
+    for n in ["faces.csv", "faces.npy", "clusters.csv", "clusters.csv.bak", "labels.csv",
+              "labels.csv.bak", "labels.csv_1.bak", "image_people.csv"]:
+        assert (work / n).read_text() == n and not (tmp_path / n).exists()
+    assert (work / "clusters" / "c00__cluster1__n5.jpg").exists()
+    assert (work / "serve_cache").is_dir()
+    # code, the album and exports stay where they are
+    assert (tmp_path / "faces.py").exists() and (tmp_path / "album").is_dir()
+    assert (tmp_path / "query").is_dir()
+
+
+def test_ensure_work_dir_only_moves_once(tmp_path):
+    (tmp_path / "work").mkdir()
+    (tmp_path / "faces.csv").write_text("stray")
+    assert common.ensure_work_dir(tmp_path) == []
+    assert (tmp_path / "faces.csv").exists() and not (tmp_path / "work" / "faces.csv").exists()
+
+
+def test_ensure_work_dir_fresh_checkout_just_creates_it(tmp_path):
+    assert common.ensure_work_dir(tmp_path) == []
+    assert (tmp_path / "work").is_dir()
 
 
 # --- serve thumbnail keys --------------------------------------------------
