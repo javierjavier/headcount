@@ -193,7 +193,7 @@ def _recover_desync(faces_csv: Path, emb_path: Path, done_path: Path) -> bool:
 
     # Rewrite faces.csv to header + first `keep` rows.
     with faces_csv.open("w", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(FACES_HEADER)
         for r in rows[:keep]:
             w.writerow([r[c] for c in FACES_HEADER])
@@ -317,7 +317,7 @@ def cmd_embed(args) -> int:
                 for k, hh in zip(backfill, ex.map(lambda k: _file_hash(key_to_path[k]), backfill)):
                     recorded[k] = hh
             with hash_path.open("a", newline="") as hf:
-                w = csv.writer(hf)
+                w = csv.writer(hf, lineterminator="\n")
                 for k in backfill:
                     w.writerow([k, recorded[k]])
         for k, hh in recorded.items():
@@ -377,8 +377,8 @@ def cmd_embed(args) -> int:
     # consults), while zero-face images still get marked processed.
     with faces_csv.open("a", newline="") as cf, emb_path.open("ab") as ef, \
             done_path.open("a") as df, hash_path.open("a", newline="") as hf:
-        writer = csv.writer(cf)
-        hash_writer = csv.writer(hf)
+        writer = csv.writer(cf, lineterminator="\n")
+        hash_writer = csv.writer(hf, lineterminator="\n")
         if new_csv:
             writer.writerow(FACES_HEADER)
         # Record skipped duplicates as processed up front so a crash mid-run
@@ -530,7 +530,7 @@ def cmd_cluster(args) -> int:
         shutil.copy2(out, backup)
         print(f"Backed up prior {out} -> {backup} (lets `review` remap labels by face_id).")
     with out.open("w", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(["face_id", "cluster_id"])
         for r, c in zip(rows, full):
             w.writerow([r["face_id"], int(c)])
@@ -759,7 +759,7 @@ def cmd_review(args) -> int:
     report = []  # (cid, name, purity|None) for the carried-forward summary
     kept = set()  # montage filenames written this run, to sweep stale ones below
     with labels_path.open("w", newline="") as lf:
-        w = csv.writer(lf)
+        w = csv.writer(lf, lineterminator="\n")
         w.writerow(["montage", "name"])
         for rank, (cid, fr) in enumerate(ranked):
             thumbs = crops.get(cid)
@@ -1005,7 +1005,7 @@ def cmd_scene(args) -> int:
     else:
         final_rows = new_rows
     with out.open("w", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(header)
         w.writerows(final_rows)
 
@@ -1215,7 +1215,7 @@ def cmd_assign(args) -> int:
 
     out_csv = Path(args.out)
     with out_csv.open("w", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(["filename", "names"])
         for fn in sorted(images):
             w.writerow([fn, ";".join(sorted(img_names.get(fn, ())))])
@@ -1256,7 +1256,7 @@ def _write_video_people(out_csv: Path, results: dict[str, list]) -> None:
     row persisted, which is what makes resume lossless.
     """
     with out_csv.open("w", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(VIDEO_PEOPLE_HEADER)
         for fn in sorted(results):
             w.writerow(results[fn])
