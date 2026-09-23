@@ -1470,12 +1470,15 @@ def cmd_query(args) -> int:
                   file=sys.stderr)
             return 1
         scene_of = {r["filename"]: r["scene"] for r in read_face_rows(scene_path)}
-    where_ok = {fn for fn, sc in scene_of.items() if sc == args.where} if args.where else None
+    where_ok = None
+    if args.where:
+        assert scene_of is not None  # loaded above whenever --where is set
+        where_ok = {fn for fn, sc in scene_of.items() if sc == args.where}
 
     # Detected-face count per image, for --split-size. Counted off faces.csv (the
     # same embed run image_people derives from), so every matched photo is covered;
     # a photo with no face rows is count 0 and falls in candid/.
-    faces_per_img = None
+    faces_per_img: Counter = Counter()
     if args.split_size:
         faces_path = Path(args.faces)
         if not faces_path.exists():
@@ -1611,6 +1614,7 @@ def cmd_query(args) -> int:
             # Route into out/<scene>/. Reachable with a missing scene row only
             # under --allow-unscored (the pre-flight check aborts otherwise);
             # those land in out/unscored/ rather than vanish.
+            assert scene_of is not None  # loaded above whenever --split-scene is set
             sub = scene_of.get(fn)
             unscored += sub is None
             dstdir = out / (sub or "unscored")
@@ -2677,7 +2681,7 @@ def cmd_serve(args) -> int:
     if fcsv.exists():
         from collections import Counter
 
-        fc = Counter()
+        fc: Counter[str] = Counter()
         for r in read_face_rows(fcsv):
             fc[r["filename"]] += 1
         face_counts = dict(fc)
