@@ -10,6 +10,7 @@ Centralizes what enroll.py and faces.py both need:
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -194,6 +195,13 @@ def build_face_app(det_size: int = 1024, det_thresh: float = 0.4, modules=("dete
         embedding). Skipping the landmark and gender/age models is faster and
         leaves embeddings/scores identical. Pass None to load everything.
     """
+    # insightface 0.7.3 (the last release) calls scikit-image's deprecated
+    # SimilarityTransform.estimate during face alignment. The warning is about the
+    # dependency, not us, and `video` repeats it once per clip over the progress
+    # bar, so hide just that one.
+    warnings.filterwarnings("ignore", message="`estimate` is deprecated",
+                            category=FutureWarning, module="insightface")
+
     # Imported lazily so `--help` and arg errors don't pay the import cost.
     from insightface.app import FaceAnalysis
 
