@@ -63,7 +63,7 @@ def test_query_any_and_without():
     assert faces._query_match({"Ada", "Ben"}, {"Ada"}, set(), {"Ben"}, set()) is False
 
 
-# --- _confirmed_ok (--confirmed-only: positives must be clustered) -----------
+# --- _confirmed_ok (--recovered drop/split: positives must be clustered) -----
 
 def test_confirmed_ok_with_requires_all_clustered():
     # --with Ada,Ben: both must have a clustered (not recovery-only) face.

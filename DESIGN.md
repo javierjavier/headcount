@@ -176,7 +176,7 @@ into `query/<expr>/`:
 Derived analytics are cheap too — e.g. "who is Ada most often photographed with?"
 is just ranking co-occurrence counts against Ada's set.
 
-### Output binning: `--split-scene`, `--split-size`, `--confirmed-only`
+### Output binning: `--split-scene`, `--split-size`, `--recovered`
 
 A `query` can fan its matches into subfolders instead of one flat directory.
 `--split-scene` buckets by `scene.csv` (indoor/outdoor). `--split-size` buckets
@@ -365,13 +365,15 @@ error (`ArchiveFoundError`), not a silent skip.
   clusters. The data model assumes this from the start.
 - **Two similar kids merged into one cluster** — rarer. Re-cluster that cluster
   at lower `eps`, or split manually. Flag impure clusters during review.
-- **Junk faces** — handled by the embed-phase pre-filter plus DBSCAN noise.
+- **Junk faces** — handled by the `cluster` pre-filter (`--min-size`, `--min-det`)
+  plus HDBSCAN's noise bucket.
 - **Singletons** (a kid photographed once) — small clusters or noise; still
   surfaced in review so they can be labeled.
 
 ## Dependencies, scale, privacy
 
-- **Dependency:** add `scikit-learn` (DBSCAN). One line in `requirements.txt`.
+- **Dependency:** `scikit-learn` ≥1.3 (HDBSCAN, and DBSCAN for `--algo dbscan`).
+  One line in `requirements.txt`.
 - **Scale:** ~40k faces cluster in-memory in seconds. Millions would need an ANN
   index (`faiss`) — not needed here.
 - **Privacy:** this builds a face database of *every child in the class*, not

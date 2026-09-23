@@ -354,7 +354,7 @@ anchor:
 
 ```bash
 # Drop 5–10 clear photos of one known child into reference/, then:
-python enroll.py --reference reference/        # -> reference_embeddings.npy
+python enroll.py --reference reference/        # -> work/reference_embeddings.npy
 python faces.py cluster                         # readout: do those faces land
                                                 #   in ONE clean cluster?
 ```
@@ -391,19 +391,19 @@ them once you've copied out what you need.
 
 ## Files
 
-| File                      | Purpose                                            |
-| ------------------------- | -------------------------------------------------- |
-| `faces.py`                | The tool: `embed`/`cluster`/`review`/`assign`/`query`/`scene`/`video`/`serve` |
-| `enroll.py`               | Cold-start calibration: build `reference_embeddings.npy` from `reference/` |
-| `common.py`               | Shared HEIC/EXIF loading, model setup, small utilities |
-| `requirements.txt`        | Dependencies                                       |
-| `DESIGN.md`               | Pipeline rationale, tradeoffs, hard cases          |
-| `work/`                   | Everything below marked *generated*, plus montages and the thumbnail cache |
-| `reference_embeddings.npy`| Enrolled calibration anchor (generated)            |
-| `faces.csv` / `faces.npy` | Every face's metadata + embedding (generated)      |
-| `faces.done`              | filenames already embedded, incl. zero-face images, for resume (generated) |
-| `clusters.csv`            | face → cluster id (generated)                      |
-| `labels.csv`              | montage → name (filled in on the `serve` labeling page) |
-| `image_people.csv`        | filename → people present (generated)              |
-| `video_people.csv`        | video → people present, from `video` (generated)   |
-| `scene.csv`               | filename → indoor/outdoor (generated)              |
+| File                             | Purpose                                            |
+| -------------------------------- | -------------------------------------------------- |
+| `faces.py`                       | The tool: `embed`/`cluster`/`review`/`assign`/`query`/`scene`/`video`/`serve` |
+| `enroll.py`                      | Cold-start calibration: build `work/reference_embeddings.npy` from `reference/` |
+| `common.py`                      | Shared HEIC/EXIF loading, model setup, small utilities |
+| `requirements.txt`               | Dependencies                                       |
+| `DESIGN.md`                      | Pipeline rationale, tradeoffs, hard cases          |
+| `work/`                          | Everything the tool generates from the album (the rows below), plus montages (`work/clusters/`) and the thumbnail cache (`work/serve_cache/`) |
+| `work/reference_embeddings.npy`  | Enrolled calibration anchor (generated)            |
+| `work/faces.csv` / `faces.npy`   | Every face's metadata + embedding (generated)      |
+| `work/faces.done`                | filenames already embedded, incl. zero-face images, for resume (generated) |
+| `work/clusters.csv`              | face → cluster id (generated)                      |
+| `work/labels.csv`                | montage → name (filled in on the `serve` labeling page) |
+| `work/image_people.csv`          | filename → people present (generated)              |
+| `work/video_people.csv`          | video → people present, from `video` (generated)   |
+| `work/scene.csv`                 | filename → indoor/outdoor (generated)              |

@@ -18,7 +18,7 @@ Phases:
           person's faces fall into one clean cluster.
 
   review  Crop a sample of each cluster's faces into a contact-sheet montage
-          (clusters/) and write a skeleton labels.csv. `serve` then shows each
+          (work/clusters/) and write a skeleton labels.csv. `serve` then shows each
           montage and asks for a name; that's the actual tagging step.
 
   assign  From the names in labels.csv, compute who is in each photo ->
@@ -28,8 +28,8 @@ Phases:
           present), `--any`, `--without`, `--only`, into query/<expr>/.
           `--where indoor|outdoor` adds a location filter (needs `scene`).
 
-  scene   Tag each photo indoor/outdoor from foliage+sky colour -> scene.csv,
-          and print the hour cross-tab so it can be checked against the schedule.
+  scene   Tag each photo indoor/outdoor by EXIF capture hour (default) or
+          foliage+sky colour -> scene.csv, and print the hour cross-tab so it can be checked against the schedule.
 
   video   Name the faces inside album videos against the labeled photo clusters
           -> video_people.csv. Re-scans everything when the names change.
@@ -1515,7 +1515,7 @@ def _query_match(names: set, want: set, any_of: set, without: set, only: set) ->
 def _confirmed_ok(clustered: set, want: set, any_of: set, only: set) -> bool:
     """Whether a photo's *clustered* names satisfy the query's positive targets.
 
-    Used by `--confirmed-only` to drop recovery-only attachments: the target must
+    Used by `--recovered drop|split` to set aside recovery-only attachments: the target must
     have a real clustered face, not merely a recovery-attached name. Mirrors the
     positive half of `_query_match` (--without is intentionally not re-checked
     here; exclusion stays on full presence). Pure set logic so it's unit-testable.
@@ -3695,9 +3695,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_qry.add_argument("--faces", default=f"{WORK}/faces.csv",
                        help="face table from `embed` (for --split-size counts)")
     p_qry.add_argument("--clusters", default=f"{WORK}/clusters.csv",
-                       help="cluster assignment from `cluster` (for --confirmed-only)")
+                       help="cluster assignment from `cluster` (for --recovered drop/split)")
     p_qry.add_argument("--labels", default=f"{WORK}/labels.csv",
-                       help="cluster names from `review` (for --confirmed-only)")
+                       help="cluster names from `review` (for --recovered drop/split)")
     p_qry.add_argument("--out", default="query", help="output base folder (default: query/)")
     p_qry.add_argument("--jpeg", action="store_true",
                        help="re-encode to JPEG (reliable Finder thumbnails; HEIC ones are flaky)")
@@ -3711,7 +3711,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_qry.add_argument("--dry-run", action="store_true", help="list matches, don't write files")
     p_qry.set_defaults(func=cmd_query)
 
-    p_scn = sub.add_parser("scene", help="tag each photo indoor/outdoor (foliage+sky) -> scene.csv")
+    p_scn = sub.add_parser("scene", help="tag each photo indoor/outdoor (EXIF hour or foliage+sky) -> scene.csv")
     p_scn.add_argument("--album", default="album", help="album folder (default: album/)")
     p_scn.add_argument("--faces", default=f"{WORK}/faces.csv", help="limit to images in this face table ('' = all)")
     p_scn.add_argument("--out", default=f"{WORK}/scene.csv", help="scene index output (default: work/scene.csv)")
