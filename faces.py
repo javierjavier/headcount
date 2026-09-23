@@ -1702,6 +1702,52 @@ FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <path d="M12 27.5c0-4.7 3.8-8.5 8.5-8.5s8.5 3.8 8.5 8.5z" fill="#fff"/>
 </svg>"""
 
+# Shown while `serve` builds its caches in the background (first run: one HEIC
+# decode per photo, minutes on a big album). Polls /status and reloads into the
+# gallery when it's ready, so the browser never sits on a dead URL.
+SERVE_PREPARING_PAGE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>headcount</title>
+<link rel="icon" href="/favicon.svg">
+<style>
+  body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#16181d; color:#e7e9ee;
+         display:flex; align-items:center; justify-content:center; min-height:100vh; }
+  .box { width:min(420px, calc(100vw - 32px)); }
+  h1 { font-size:18px; margin:0 0 6px; }
+  p { color:#9aa3b2; margin:0 0 14px; }
+  .bar { height:6px; background:#2c313b; border-radius:3px; overflow:hidden; }
+  .bar div { height:100%; width:0; background:#5b9dff; transition:width .3s; }
+  #step { margin-top:10px; font-variant-numeric:tabular-nums; }
+  .err { color:#ff8a8a; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>Preparing the gallery</h1>
+  <p>The first run makes a thumbnail of every photo. Later runs reuse them and start right away.</p>
+  <div class="bar"><div id="fill"></div></div>
+  <div id="step">Starting…</div>
+</div>
+<script>
+async function poll() {
+  let s;
+  try { s = await (await fetch("/status", {cache: "no-store"})).json(); }
+  catch (e) { setTimeout(poll, 2000); return; }
+  if (s.ready) { location.reload(); return; }
+  const step = document.getElementById("step");
+  if (s.error) { step.className = "err"; step.textContent = s.error; return; }
+  step.textContent = s.step + (s.total ? ": " + s.done + " / " + s.total : "…");
+  document.getElementById("fill").style.width = (s.total ? 100 * s.done / s.total : 0) + "%";
+  setTimeout(poll, 1000);
+}
+poll();
+</script>
+</body>
+</html>"""
+
 SERVE_PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -2642,7 +2688,7 @@ def assign_thumb_keys(filenames: list[str]) -> dict[str, str]:
     return keys
 
 
-def _build_thumbs(items, album, cache, size, workers):
+def _build_thumbs(items, album, cache, size, workers, progress=None):
     """Pre-render a square-ish JPEG thumbnail per item into *cache* (idempotent).
 
     HEIC decode is the slow part, so we cache by key and skip ones already done
@@ -2698,6 +2744,8 @@ def _build_thumbs(items, album, cache, size, workers):
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         for _ in ex.map(one, todo):
             done += 1
+            if progress:
+                progress(done, len(todo))
             if done % 200 == 0:
                 print(f"  {done}/{len(todo)}")
     print(f"  done ({len(todo)} built).")
@@ -2834,66 +2882,86 @@ def cmd_serve(args) -> int:
     # subdir so _build_thumbs's `*.jpg` stale-sweep never touches them.
     pcache = cache / "preview"
     pcache.mkdir(exist_ok=True)
-    _build_thumbs(items, album, cache, args.thumb, args.prefetch)
+    # The caches below are slow on a first run (a HEIC decode per photo), so they
+    # build in a background thread while the server is already up: until
+    # state["page"] is set, / shows SERVE_PREPARING_PAGE, which polls /status.
+    state: dict = {"step": "Starting", "done": 0, "total": 0, "page": None, "error": None}
 
-    # Capture-date sidecar for sort + date grouping. Re-reading EXIF for every
-    # photo each launch is slow, so cache filename -> datetime in the thumb cache
-    # and only extract ones we haven't recorded yet.
-    dates_path = cache / "dates.json"
-    dates = _load_json_cache(dates_path)
-    missing = [it for it in items if it["f"] not in dates]
-    if missing:
-        print(f"Reading capture dates for {len(missing)} item(s) ...")
+    def prepare():
+        state["step"] = "Making thumbnails"
+        _build_thumbs(items, album, cache, args.thumb, args.prefetch,
+                      progress=lambda d, t: state.update(done=d, total=t))
 
-        def _read_dt(it):
-            p = album / it["f"]
-            return it["f"], (_video_dt(p) if it["v"] else _exif_dt(p))
+        # Capture-date sidecar for sort + date grouping. Re-reading EXIF for every
+        # photo each launch is slow, so cache filename -> datetime in the thumb cache
+        # and only extract ones we haven't recorded yet.
+        dates_path = cache / "dates.json"
+        dates = _load_json_cache(dates_path)
+        missing = [it for it in items if it["f"] not in dates]
+        if missing:
+            print(f"Reading capture dates for {len(missing)} item(s) ...")
+            state.update(step="Reading capture dates", done=0, total=0)
 
-        with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
-            for fn, dt in ex.map(_read_dt, missing):
-                dates[fn] = dt
-        dates_path.write_text(json.dumps(dates))
-    for it in items:
-        it["dt"] = dates.get(it["f"], "")
-        # Videos have no scene.csv hour; derive it from the capture time so the
-        # time-of-day filter applies to them just like photos.
-        if it["v"] and it["dt"]:
-            h = _hour_from_dt(it["dt"])
-            if h >= 0:
-                it["h"] = h
-        # ...then tag the video indoor/outdoor by that hour (see hour_scene above).
-        if it["v"] and not it["s"] and it["h"] is not None:
-            it["s"] = hour_scene.get(it["h"], "")
+            def _read_dt(it):
+                p = album / it["f"]
+                return it["f"], (_video_dt(p) if it["v"] else _exif_dt(p))
 
-    # Video durations (seconds) for the grid length badge — ffprobe once, cached
-    # in the same way as dates. Only videos need it.
-    durs_path = cache / "durations.json"
-    durs = _load_json_cache(durs_path)
-    miss_d = [it for it in items if it["v"] and it["f"] not in durs]
-    if miss_d:
-        print(f"Reading durations for {len(miss_d)} video(s) ...")
-        with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
-            for fn, d in ex.map(lambda it: (it["f"], _video_duration(album / it["f"])), miss_d):
-                durs[fn] = d
-        durs_path.write_text(json.dumps(durs))
-    for it in items:
-        it["d"] = float(durs.get(it["f"], 0.0)) if it["v"] else 0.0
+            with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
+                for fn, dt in ex.map(_read_dt, missing):
+                    dates[fn] = dt
+            dates_path.write_text(json.dumps(dates))
+        for it in items:
+            it["dt"] = dates.get(it["f"], "")
+            # Videos have no scene.csv hour; derive it from the capture time so the
+            # time-of-day filter applies to them just like photos.
+            if it["v"] and it["dt"]:
+                h = _hour_from_dt(it["dt"])
+                if h >= 0:
+                    it["h"] = h
+            # ...then tag the video indoor/outdoor by that hour (see hour_scene above).
+            if it["v"] and not it["s"] and it["h"] is not None:
+                it["s"] = hour_scene.get(it["h"], "")
 
-    all_names = sorted({n for it in items for n in it["n"]})
-    # Album-relative parent dir of each item (POSIX, see rel_key) — drives the
-    # gallery's per-subfolder filter. Files sitting directly in album/ have no
-    # subfolder; "" groups them together (labelled "album root" client-side).
-    def _subfolder(fn: str) -> str:
-        return fn.rsplit("/", 1)[0] if "/" in fn else ""
+        # Video durations (seconds) for the grid length badge — ffprobe once, cached
+        # in the same way as dates. Only videos need it.
+        durs_path = cache / "durations.json"
+        durs = _load_json_cache(durs_path)
+        miss_d = [it for it in items if it["v"] and it["f"] not in durs]
+        if miss_d:
+            print(f"Reading durations for {len(miss_d)} video(s) ...")
+            state.update(step="Reading video lengths", done=0, total=0)
+            with ThreadPoolExecutor(max_workers=max(1, args.prefetch)) as ex:
+                for fn, d in ex.map(lambda it: (it["f"], _video_duration(album / it["f"])), miss_d):
+                    durs[fn] = d
+            durs_path.write_text(json.dumps(durs))
+        for it in items:
+            it["d"] = float(durs.get(it["f"], 0.0)) if it["v"] else 0.0
 
-    all_folders = sorted({_subfolder(it["f"]) for it in items})
-    manifest = {"names": all_names, "folders": all_folders, "liveMax": args.live_max,
-                "items": [{"k": it["k"], "n": it["n"], "fc": it["fc"],
-                           "h": it["h"], "s": it["s"], "sf": _subfolder(it["f"]),
-                           "dt": it["dt"], "v": 1 if it["v"] else 0,
-                           "d": round(it["d"], 1) if it["v"] else 0}
-                          for it in items]}
-    page = SERVE_PAGE.replace("__MANIFEST__", json.dumps(manifest))
+        all_names = sorted({n for it in items for n in it["n"]})
+        # Album-relative parent dir of each item (POSIX, see rel_key) — drives the
+        # gallery's per-subfolder filter. Files sitting directly in album/ have no
+        # subfolder; "" groups them together (labelled "album root" client-side).
+        def _subfolder(fn: str) -> str:
+            return fn.rsplit("/", 1)[0] if "/" in fn else ""
+
+        all_folders = sorted({_subfolder(it["f"]) for it in items})
+        manifest = {"names": all_names, "folders": all_folders, "liveMax": args.live_max,
+                    "items": [{"k": it["k"], "n": it["n"], "fc": it["fc"],
+                               "h": it["h"], "s": it["s"], "sf": _subfolder(it["f"]),
+                               "dt": it["dt"], "v": 1 if it["v"] else 0,
+                               "d": round(it["d"], 1) if it["v"] else 0}
+                              for it in items]}
+        state["page"] = SERVE_PAGE.replace("__MANIFEST__", json.dumps(manifest))
+        n_vid = sum(1 for it in items if it["v"])
+        summary = f"{len(items) - n_vid} photos" + (f", {n_vid} videos" if n_vid else "")
+        print(f"\n  gallery ready: {summary}, {len(all_names)} names\n")
+
+    def prepare_or_report():
+        try:
+            prepare()
+        except Exception as e:  # noqa: BLE001 — surface it in the browser, not just the terminal
+            state["error"] = f"Preparing the gallery failed: {e!r}\nSee the terminal for details."
+            raise
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet: no per-request console spam
@@ -2951,11 +3019,20 @@ def cmd_serve(args) -> int:
             from urllib.parse import unquote, urlparse
             parts = urlparse(self.path)
             path, query = unquote(parts.path), parts.query
-            if path == "/":
-                self._send(200, page.encode(), "text/html; charset=utf-8")
+            if path == "/status":
+                st = {"ready": state["page"] is not None, "step": state["step"],
+                      "done": state["done"], "total": state["total"], "error": state["error"]}
+                self._send(200, json.dumps(st).encode(), "application/json",
+                           {"Cache-Control": "no-store"})
+            elif path == "/":
+                body = state["page"] or SERVE_PREPARING_PAGE
+                self._send(200, body.encode(), "text/html; charset=utf-8",
+                           {"Cache-Control": "no-store"})
             elif path == "/favicon.svg":
                 self._send(200, FAVICON_SVG.encode(), "image/svg+xml",
                            {"Cache-Control": "max-age=86400"})
+            elif state["page"] is None:
+                self._send(503, b"gallery is still preparing", "text/plain")
             elif path.startswith("/thumb/"):
                 it = by_key.get(path[len("/thumb/"):])
                 f = cache / f"{it['k']}.jpg" if it else None
@@ -3000,6 +3077,9 @@ def cmd_serve(args) -> int:
             from urllib.parse import urlparse
             if urlparse(self.path).path != "/export":
                 self._send(404, b"not found", "text/plain")
+                return
+            if state["page"] is None:
+                self._send(503, b"gallery is still preparing", "text/plain")
                 return
             try:
                 length = int(self.headers.get("Content-Length", 0))
@@ -3048,10 +3128,8 @@ def cmd_serve(args) -> int:
 
     httpd = Server((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
-    n_vid = sum(1 for it in items if it["v"])
-    summary = f"{len(items) - n_vid} photos" + (f", {n_vid} videos" if n_vid else "")
-    print(f"\n  headcount browsing {summary}, {len(all_names)} names")
-    print(f"  serving at {url}  (Ctrl-C to stop)\n")
+    print(f"\n  serving at {url}  (Ctrl-C to stop)\n")
+    threading.Thread(target=prepare_or_report, daemon=True).start()
     if not args.no_open:
         webbrowser.open(url)
     try:

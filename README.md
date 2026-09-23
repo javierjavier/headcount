@@ -123,7 +123,8 @@ python faces.py video --fps 2 --limit 20       # denser sampling; first 20 clips
 #    Finder: name + time-of-day filters, a preview-size slider, and zip export
 #    (originals, or re-encoded 2048px JPEGs). Nothing leaves the machine; it
 #    binds 127.0.0.1 only. First run builds a thumbnail cache (.serve_cache/),
-#    which is the slow part (re-decodes each HEIC); later runs reuse it.
+#    which is the slow part (re-decodes each HEIC); the browser opens right away
+#    and shows progress, then loads the gallery. Later runs reuse the cache.
 #    Videos in album/ also appear in the grid (play inline in the lightbox);
 #    toggle them with the Media checkboxes (photos/live photos/videos), or hide
 #    all videos with --no-videos.
