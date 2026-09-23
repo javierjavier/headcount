@@ -1105,15 +1105,22 @@ def apply_label_edits(rows: list[dict], edits: dict[str, str]) -> list[dict]:
 
 def write_label_rows(path: Path, rows: list[dict]) -> None:
     """Write labels.csv as `montage,name`, replacing the file in one step so
-    `assign` never reads a half-written file."""
+    `assign` never reads a half-written file. No-op when the content is the same."""
+    import io
     import os
 
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(["montage", "name"])
+    for r in rows:
+        w.writerow([r["montage"], r["name"]])
+    # Leave the file (and its mtime) alone when nothing changed: paging through the
+    # labeling page saves on every step, and a newer labels.csv makes serve re-run
+    # assign.
+    if path.exists() and path.read_text() == buf.getvalue():
+        return
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", newline="") as f:
-        w = csv.writer(f, lineterminator="\n")
-        w.writerow(["montage", "name"])
-        for r in rows:
-            w.writerow([r["montage"], r["name"]])
+    tmp.write_text(buf.getvalue())
     os.replace(tmp, path)
 
 
@@ -1310,6 +1317,27 @@ def cmd_assign(args) -> int:
 VIDEO_PEOPLE_HEADER = ["filename", "names", "n_named", "peaks"]
 
 
+def names_fingerprint(rows: list[dict], clusters: dict[str, int], labels: dict[int, str]) -> str:
+    """Short hash of which name each photo face carries (face_id -> name).
+
+    `video` matches clips against per-name centroids built from exactly this, so
+    it changes whenever a name is added, removed or renamed, or a re-cluster moves
+    faces between names. `video` stores it next to video_people.csv; a mismatch
+    means the video names are out of date.
+    """
+    h = hashlib.sha256()
+    for r in rows:
+        name = labels.get(clusters.get(r["face_id"], -2))
+        if name:
+            h.update(f"{r['face_id']}\t{name}\n".encode())
+    return h.hexdigest()[:16]
+
+
+def video_names_path(out_csv: Path) -> Path:
+    """Where `video` records the names_fingerprint it scanned with."""
+    return out_csv.with_suffix(".names")
+
+
 def _write_video_people(out_csv: Path, results: dict[str, list]) -> None:
     """Rewrite video_people.csv from the *results* map (filename -> row).
 
@@ -1369,6 +1397,19 @@ def cmd_video(args) -> int:
     out_csv = Path(args.out)
     done_path = out_csv.with_suffix(".done")
     done = read_done_manifest(done_path)
+    # Clips scanned against different names (labels edited, or re-clustered since)
+    # carry stale names, so start over rather than resume. A scan from before the
+    # fingerprint existed has no record and counts as different.
+    fp_path = video_names_path(out_csv)
+    fp = names_fingerprint(rows, clusters, labels)
+    old_fp = fp_path.read_text().strip() if fp_path.exists() else ""
+    if old_fp != fp:
+        if done:
+            print(f"Names changed since the last video scan; re-scanning all {len(videos)} videos.")
+            done = set()
+            done_path.unlink(missing_ok=True)
+            out_csv.unlink(missing_ok=True)
+        fp_path.write_text(fp + "\n")
     # Preserve rows already computed (resume / re-run); new scans overwrite their key.
     results: dict[str, list] = {r["filename"]: [r.get(c, "") for c in VIDEO_PEOPLE_HEADER]
                                 for r in read_face_rows(out_csv)}
@@ -2039,6 +2080,8 @@ SERVE_PAGE = """<!doctype html>
   .reset { width:100%; margin-bottom:6px; background:none; color:var(--muted); border:1px solid var(--line); padding:8px 12px; font-weight:500; }
   .reset:hover:not(:disabled) { color:var(--ink); border-color:var(--accent); }
   .reset:disabled { opacity:.45; cursor:default; }
+  .stale { margin-bottom:10px; padding:8px 12px; border:1px solid #6b5423; background:#2a2418; color:#ffd88a; border-radius:7px; font-size:13px; }
+  .stale code { font:12px ui-monospace,Menlo,monospace; color:var(--ink); }
   .relabel { display:block; margin-bottom:10px; color:var(--accent); text-decoration:none; font-weight:600; }
   .relabel:hover { text-decoration:underline; }
   .ctl { display:flex; align-items:center; gap:8px; color:var(--muted); }
@@ -2148,6 +2191,7 @@ SERVE_PAGE = """<!doctype html>
   </aside>
   <main>
     <div class="topbar">
+    <div class="stale" id="vstale" hidden>Video names are out of date: names changed since they were found. Run <code>python faces.py video</code> to update them.</div>
     <div class="active" id="active"></div>
     <div class="bar">
       <span class="n" id="count"></span>
@@ -2184,6 +2228,7 @@ SERVE_PAGE = """<!doctype html>
 
 <script>
 const DATA = __MANIFEST__;
+document.getElementById("vstale").hidden = !DATA.videoStale;
 const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, dmin:0, dmax:0, scene:"", media:{photo:true, live:true, video:true}, foldersOff:new Set(), foldOpen:false, collapsedDays:new Set(), search:"", sort:"new", nsort:"az", cell:150 };
 // album subfolders present in the data (""=album root). Stored as an *exclude*
 // set so the default (nothing excluded) shows everything and a freshly imported
@@ -3079,9 +3124,24 @@ def cmd_serve(args) -> int:
         # clips get the same name filter/caption treatment as photos.
         vpeople = {}
         vp = Path(args.video_people)
+        state["video_stale"] = False
         if vp.exists():
             vpeople = {r["filename"]: sorted(filter(None, (r.get("names") or "").split(";")))
                        for r in read_face_rows(vp)}
+            # The clips were matched against the names at the time `video` ran; if
+            # they've changed since, flag it in the gallery (the names still show).
+            fp_path = video_names_path(vp)
+            old_fp = fp_path.read_text().strip() if fp_path.exists() else ""
+            try:
+                frows = read_face_rows(fcsv)
+                fp = names_fingerprint(frows, load_cluster_map(frows, Path(args.clusters)),
+                                       _read_labels(labels_path))
+            except (OSError, ValueError):
+                fp = ""
+            if fp != old_fp:
+                state["video_stale"] = True
+                print("  ! video names are out of date (names changed since `video` ran); "
+                      "run `python faces.py video` to update them.")
 
         # `k` is a filesystem-safe key used for thumb/full/video URLs and as the cache
         # filename; `f` is the real album-relative path used to read original bytes.
@@ -3204,6 +3264,7 @@ def cmd_serve(args) -> int:
 
         all_folders = sorted({_subfolder(it["f"]) for it in items})
         manifest = {"names": all_names, "folders": all_folders, "liveMax": args.live_max,
+                    "videoStale": state.get("video_stale", False),
                     "items": [{"k": it["k"], "n": it["n"], "fc": it["fc"],
                                "h": it["h"], "s": it["s"], "sf": _subfolder(it["f"]),
                                "dt": it["dt"], "v": 1 if it["v"] else 0,

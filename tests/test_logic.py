@@ -455,6 +455,29 @@ def test_apply_label_edits_rejects_unknown_montage_and_semicolon():
             raise AssertionError(f"expected ValueError for {edits}")
 
 
+def test_write_label_rows_leaves_unchanged_file_alone(tmp_path):
+    import os
+
+    lp = tmp_path / "labels.csv"
+    rows = [{"montage": "c00__cluster5__n100.jpg", "name": "Ada", "size": 100}]
+    faces.write_label_rows(lp, rows)
+    os.utime(lp, (1000, 1000))
+    faces.write_label_rows(lp, rows)
+    assert lp.stat().st_mtime == 1000              # same content: not rewritten
+    faces.write_label_rows(lp, [{**rows[0], "name": "Ben"}])
+    assert lp.stat().st_mtime != 1000
+
+
+def test_names_fingerprint_tracks_names_and_membership():
+    rows = [{"face_id": "0"}, {"face_id": "1"}, {"face_id": "2"}]
+    clusters = {"0": 5, "1": 5, "2": 6}
+    base = faces.names_fingerprint(rows, clusters, {5: "ada"})
+    assert faces.names_fingerprint(rows, clusters, {5: "ada"}) == base
+    assert faces.names_fingerprint(rows, clusters, {5: "Ada"}) != base           # renamed
+    assert faces.names_fingerprint(rows, clusters, {5: "ada", 6: "ben"}) != base  # name added
+    assert faces.names_fingerprint(rows, {"0": 5, "1": 6, "2": 6}, {5: "ada"}) != base  # re-clustered
+
+
 def test_assign_is_stale(tmp_path):
     import os
 

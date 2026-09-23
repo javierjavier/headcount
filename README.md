@@ -124,6 +124,8 @@ python faces.py query --with ada --split-size --recovered split --zip
 #    video_people.csv (clip -> names). Resumable like embed; needs ffmpeg. The
 #    photo pipeline is untouched — this only reads faces/clusters/labels. Slow-ish
 #    (a mini-embed: ~detector inference per sampled frame), so it's opt-in.
+#    If you change names afterwards, the gallery says the video names are out of
+#    date; running `video` again re-scans every clip with the new names.
 python faces.py video                          # -> video_people.csv
 python faces.py video --fps 2 --limit 20       # denser sampling; first 20 clips
 
@@ -210,7 +212,8 @@ re-encoded). Use `--no-videos` to leave them out.
 If you've run `faces.py video` (see step 6b), `serve` also overlays each clip's
 detected names from `video_people.csv` — so videos become name-filterable and
 show names in the grid tooltip and lightbox caption, just like photos. Without
-that pass, videos simply show with no names.
+that pass, videos simply show with no names. If names have changed since `video`
+ran, the gallery shows a note above the grid until you run it again.
 
 Two notes:
 
