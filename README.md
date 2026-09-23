@@ -57,94 +57,34 @@ query/       # created by `query` — the slices you pull out
 Checkouts from before `work/` existed kept these files at the top level; the
 first run moves them into `work/` and prints what it moved.
 
-## Workflow (`faces.py`)
+## Workflow
 
-First, put all the photos in `album/` (any Pillow-readable format — see Setup).
-Then the pipeline is expensive-once / tune-cheap: one slow `embed`, then fast
-re-runnable steps.
+Put all the photos in `album/` (any Pillow-readable format, see Setup), or
+symlink a folder there: `ln -s /path/to/photos album`. Then run three commands
+and open the gallery:
 
 ```bash
-# 0. populate album/ — drop the full set of photos in (or symlink a folder:
-#    `ln -s /path/to/photos album`). embed reads everything in album/.
-
-# 1. embed — detect + embed EVERY face, once (slow, resumable). HEIC decode is
-#    overlapped with inference on background threads (--prefetch, ~1.5x on M1).
+# 1. embed — find and embed every face. Slow (about 40 min for 4.7k photos) and
+#    done once; if it stops, running it again picks up where it left off.
 python faces.py embed
 
-# 2. cluster — group faces by identity (HDBSCAN). Fast and re-runnable.
-#    --min-cluster-size tunes granularity (15 is a good default). If you enrolled
-#    a reference child (see Calibration), it prints a readout showing whether
-#    those known faces land in ONE clean cluster.
+# 2. cluster — group faces by who they look like. Fast; safe to re-run.
 python faces.py cluster
 
-# 3. review — montage each cluster into work/clusters/ + write a skeleton labels.csv
+# 3. review — make one montage per group and a blank work/labels.csv.
 python faces.py review
 
-# 4. label — opens a page in the browser that shows each montage and asks who it
-#    is. Type a name or skip; press Done and it builds the gallery (step 7).
-#    The gallery's thumbnails build in the background while you label, so on a
-#    first run most of that wait is over by the time you press Done.
-#    See "Labeling" below the workflow.
-python faces.py serve
-
-# 5. assign — who's in each photo -> image_people.csv (+ per-child counts).
-#    serve runs this for you whenever the names change, so you only need it for
-#    the options below.
-#    Noise recovery is ON by default: pulls noise/profile faces into their nearest
-#    named cluster, lifting recall (~84%->97% for a well-photographed kid) at ~97%
-#    purity. --no-recover for strict named-clusters-only. --folders [dir] also sorts
-#    copies into by_child/<name>/ (opt-in, default off; a photo with 3 named kids
-#    lands in all 3 folders).
-python faces.py assign --folders               # also fan out into by_child/
-
-# 6. query — copy any slice into query/<expr>/ as the original files; --jpeg to
-#    re-encode (most reliable Finder thumbnails, since macOS thumbnails HEIC
-#    unreliably). --jpeg also takes
-#    --max-size N to downscale and --strip-exif to drop metadata.
-#    Each query/<expr>/ dir is wiped and rewritten per run, so it always reflects
-#    the current query.
-python faces.py query --with ada,ben          # both present
-python faces.py query --with ada,ben --jpeg   # browsable: reliable thumbnails
-python faces.py query --with ada --without ben
-python faces.py query --only ada,ben          # exactly those two
-
-#    Binning + precision (see DESIGN.md "Output binning"):
-#    --split-scene       -> indoor/ + outdoor/   (needs `scene`)
-#    --split-size        -> candid/ + large-group/ by detected-face count (--large-min, default 5)
-#    --recovered split   -> quarantine recovery-only matches in a recovered/ folder for review
-#    --recovered drop    -> exclude them entirely (max precision; folder gets __clustered)
-#
-#    Repeatable "give a parent every clean photo of their kid" export:
-python faces.py query --with ada --split-size --recovered split --zip
-#    -> query/with_ada/{candid,large-group,recovered}/ + a .zip alongside.
-#    'recovered/' holds the lower-confidence matches to skim before sending; use
-#    --recovered drop to omit them, or keep (default) to mix them into the bins.
-
-# 6b. video — (optional) name the faces INSIDE album videos, using the labels you
-#    already filled in. Samples frames (default 1 fps), matches each face to your
-#    labeled clusters at the calibrated 0.35 threshold, and writes
-#    video_people.csv (clip -> names). Resumable like embed; needs ffmpeg. The
-#    photo pipeline is untouched — this only reads faces/clusters/labels. Slow-ish
-#    (a mini-embed: ~detector inference per sampled frame), so it's opt-in.
-#    If you change names afterwards, the gallery says the video names are out of
-#    date; running `video` again re-scans every clip with the new names.
-python faces.py video                          # -> video_people.csv
-python faces.py video --fps 2 --limit 20       # denser sampling; first 20 clips
-
-# 7. serve — browse the whole album in a localhost-only web gallery instead of
-#    Finder: name + time-of-day filters, a preview-size slider, and zip export
-#    (originals, or re-encoded 2048px JPEGs). Nothing leaves the machine; it
-#    binds 127.0.0.1 only. First run builds a thumbnail cache (work/serve_cache/),
-#    which is the slow part (re-decodes each HEIC); the browser opens right away
-#    and shows progress, then loads the gallery. Later runs reuse the cache.
-#    Videos in album/ also appear in the grid (play inline in the lightbox);
-#    toggle them with the Media checkboxes (photos/live photos/videos), or hide
-#    all videos with --no-videos. "Edit names" in the sidebar goes back to the
-#    labeling page.
+# 4. serve — opens the browser. The first time, it asks you to name each
+#    montage (see "Labeling" below). Press Done and it opens the gallery.
 python faces.py serve                          # -> http://127.0.0.1:8765
-python faces.py serve --thumb 1024             # sharper previews (see note)
-python faces.py serve --no-videos              # photos only
 ```
+
+From then on, `python faces.py serve` opens the gallery directly. Everything
+else is in the browser: filter by name, time of day, date and number of faces,
+export a zip, and change names with **Edit names** in the sidebar. Nothing
+leaves the machine; the server listens on 127.0.0.1 only.
+
+The options that still need the command line are under *Advanced* below.
 
 ### Labeling (step 4)
 
@@ -189,6 +129,11 @@ the edits on its next start.
 
 ### Gallery (`serve`)
 
+The first run builds a thumbnail cache in `work/serve_cache/`, which is the slow
+part (it decodes every photo again). Most of it builds while you label, and the
+browser shows progress until the gallery is ready. Later runs reuse the cache.
+Zip export gives the originals or 2048px JPEGs (EXIF removed).
+
 Previews come from `work/serve_cache/` thumbnails built at `--thumb` long-edge
 (default 768). The grid fills cells by the photo's *short* edge and HiDPI/Retina
 screens want ~2× the CSS pixels, so a too-small thumb upscales and looks blurry —
@@ -211,7 +156,7 @@ container `creation_time`, converted from UTC to local, falling back to file
 mtime) and the hour filter, and in zip export (always as the original file, never
 re-encoded). Use `--no-videos` to leave them out.
 
-If you've run `faces.py video` (see step 6b), `serve` also overlays each clip's
+If you've run `faces.py video` (see *Advanced*), `serve` also overlays each clip's
 detected names from `video_people.csv` — so videos become name-filterable and
 show names in the grid tooltip and lightbox caption, just like photos. Without
 that pass, videos simply show with no names. If names have changed since `video`
@@ -229,61 +174,22 @@ Two notes:
   link so the original is always reachable. Streaming is HTTP Range-served, so
   seeking only fetches the needed bytes.
 
-### Calibration (`enroll.py`) — optional, for a new album
+### Sending photos to a parent
 
-Clustering is unsupervised, so on a fresh album you have no ground truth to tell
-whether your `--min-cluster-size` / `--eps` produced clean clusters before you
-sink time into labeling. Enrolling one child you can recognize gives `cluster` an
-anchor:
+1. In the gallery, tick the child's name.
+2. Tick **confident matches only**.
+3. Press **Export zip**.
 
-```bash
-# Drop 5–10 clear photos of one known child into reference/, then:
-python enroll.py --reference reference/        # -> reference_embeddings.npy
-python faces.py cluster                         # readout: do those faces land
-                                                #   in ONE clean cluster?
-```
+The box leaves out photos where the child was matched only by the step that
+pulls in faces that didn't fit any group (noise recovery, see `assign` below).
+Those matches are right about 97% of the time, so a large export without the
+box usually includes a few photos of other children. Only those photos are left
+out; every photo where the child's face was grouped with their other photos
+stays in. Video names are all matched this way, so videos never count as
+confident.
 
-The readout's goal: the reference faces concentrate in a single cluster that's
-almost all reference — split across many clusters means raise `--eps`; mixed with
-other kids means lower it. Check the "reference-to-reference similarity" that
-`enroll.py` prints too: if one photo barely matches the others, it's probably the
-wrong kid or a bad shot — remove it and re-enroll. Once the clustering is dialed
-in and labeled, you don't need this again for routine re-runs.
-
-A tightly-cropped close-up where the face fills the frame can *fail* to detect at
-a large `det-size` (the upscaled face exceeds the detector's anchor range), so
-`enroll.py` defaults to a **smaller** `det-size` (640) than `embed`. If an
-obviously-clear reference reports "no face detected," it's cropped too tight —
-give it margin, or lower `enroll.py --det-size`.
-
-### Indoor / outdoor (`scene`)
-
-Optional location dimension. If the album's GPS is stripped but the daily
-schedule is rigid (e.g. an outdoor block at a fixed hour), classify by EXIF
-time — instant, no decode:
-
-```bash
-python faces.py scene --method time --outdoor-hours 10-11   # -> scene.csv
-python faces.py query --with ada --where outdoor
-```
-
-`--outdoor-hours` counts whole clock hours and includes both ends: `10-11` means
-10:00–11:59. So an outdoor block from 10am to noon is `--outdoor-hours 10-11`,
-not `10-12` (which would also tag 12:00–12:59).
-
-`scene` rewrites the whole `scene.csv` with one outdoor-hours rule. If a later
-import's outdoor block differs from earlier batches (different day, different
-schedule), re-tagging everything would mis-tag the old batches. Use `--subdir` to
-classify just that import's folder and **merge** the result, leaving other
-batches' rows untouched:
-
-```bash
-python faces.py scene --subdir 20260618 --outdoor-hours 13-14   # only that batch
-```
-
-A foliage/sky colour method (`--method green`) also exists, but green classroom
-decor (a leafy rug, a green wall) makes it leak ~20%; time wins for this album.
-See `DESIGN.md` / commit history.
+To look through the left-out photos before deciding, use
+`query --recovered split` (see *Advanced*).
 
 ### Speed & adding photos
 
@@ -301,7 +207,7 @@ non-speedup.
 
 To add photos later: drop the new batch into **its own subfolder** under
 `album/` (e.g. `album/photos-3/`), then re-run `embed` (skips already-done
-files), `cluster`, and `assign`. Resume tracks done images in a `faces.done`
+files), `cluster`, `review` and `serve`. Resume tracks done images in a `faces.done`
 manifest (one path per line) alongside `faces.csv`/`.npy`/`.emb`. `faces.csv`
 only lists images that yielded a face, so the manifest is what lets a re-run also
 skip images where *no* face was detected — otherwise those would be re-decoded
@@ -335,14 +241,142 @@ archive — rather than silently skipping every photo packed inside it. The face
 pipeline ignores videos and other non-image files; videos do, however, show up in
 the `serve` gallery (see *Videos in the gallery* above).
 
+## Advanced: command-line options
+
+None of these are needed for the workflow above.
+
+### `assign` — who's in each photo
+
+`serve` runs `assign` for you whenever the names change. Run it yourself only for
+these options:
+
+```bash
+python faces.py assign --folders               # also copy photos into by_child/<name>/
+python faces.py assign --no-recover            # only faces in a named group count
+```
+
+Noise recovery is on by default: faces that didn't fit any group are matched to
+the nearest named child if they're close enough. It raises how many of a child's
+photos are found (about 84% to 97% for a well-photographed child), and about 97%
+of those extra matches are right. `--folders [dir]` copies photos into one
+folder per child; a photo with 3 named children lands in all 3 folders.
+
+### `query` — repeatable exports
+
+Copies a set of photos into `query/<expr>/` as the original files. Each run
+wipes and rewrites that folder. It covers what the gallery can't: "none of" and
+"exactly these" filters, subfolders inside the export, a separate folder for the
+lower-confidence matches, and other JPEG settings.
+
+```bash
+python faces.py query --with ada,ben          # both present
+python faces.py query --any ada,ben           # at least one
+python faces.py query --with ada --without ben
+python faces.py query --only ada,ben          # exactly those two
+python faces.py query --with ada --dry-run    # list matches, write nothing
+```
+
+Output options:
+
+- `--jpeg` re-encodes to JPEG. macOS Finder shows HEIC thumbnails unreliably and
+  JPEG ones always. With `--jpeg`: `--max-size N` downscales, `--jpeg-quality`
+  sets quality, `--strip-exif` drops metadata (kept by default).
+- `--zip` also writes `query/<expr>.zip`.
+- `--split-scene` sorts into `indoor/` and `outdoor/` (needs `scene`).
+  `--where indoor|outdoor` keeps only one.
+- `--split-size` sorts into `candid/` and `large-group/` by the number of faces
+  detected (`--large-min`, default 5).
+- `--recovered drop` leaves out matches from noise recovery, like the gallery's
+  **confident matches only** box; the folder name gets `__clustered`.
+  `--recovered split` puts them in a `recovered/` folder to look through first.
+
+The same export for a parent, split into folders:
+
+```bash
+python faces.py query --with ada --split-size --recovered split --zip
+# -> query/with_ada/{candid,large-group,recovered}/ + a .zip alongside
+```
+
+See DESIGN.md "Output binning" for how the bins are chosen.
+
+### `video` — names inside videos
+
+Finds the named children in album videos and writes `work/video_people.csv`.
+The gallery then shows those names on clips and lets you filter videos by name.
+It samples frames (default 1 per second) and matches each face against the
+groups you've named, so it only works after labeling. Needs ffmpeg. It takes a
+while (about 18 minutes for 704 clips), so it isn't part of the main workflow.
+If it stops, running it again continues.
+
+```bash
+python faces.py video
+python faces.py video --fps 2 --limit 20       # more frames; first 20 clips
+```
+
+If you change names afterwards, the gallery says the video names are out of
+date. Running `video` again re-scans every clip with the new names.
+
+### Indoor / outdoor (`scene`)
+
+Optional location dimension. If the album's GPS is stripped but the daily
+schedule is rigid (e.g. an outdoor block at a fixed hour), classify by EXIF
+time — instant, no decode:
+
+```bash
+python faces.py scene --method time --outdoor-hours 10-11   # -> scene.csv
+python faces.py query --with ada --where outdoor
+```
+
+`--outdoor-hours` counts whole clock hours and includes both ends: `10-11` means
+10:00–11:59. So an outdoor block from 10am to noon is `--outdoor-hours 10-11`,
+not `10-12` (which would also tag 12:00–12:59).
+
+`scene` rewrites the whole `scene.csv` with one outdoor-hours rule. If a later
+import's outdoor block differs from earlier batches (different day, different
+schedule), re-tagging everything would mis-tag the old batches. Use `--subdir` to
+classify just that import's folder and **merge** the result, leaving other
+batches' rows untouched:
+
+```bash
+python faces.py scene --subdir 20260618 --outdoor-hours 13-14   # only that batch
+```
+
+A foliage/sky colour method (`--method green`) also exists, but green classroom
+decor (a leafy rug, a green wall) makes it leak ~20%; time wins for this album.
+See `DESIGN.md` / commit history.
+
+### Calibration (`enroll.py`) — optional, for a new album
+
+Clustering is unsupervised, so on a fresh album you have no ground truth to tell
+whether your `--min-cluster-size` / `--eps` produced clean clusters before you
+sink time into labeling. Enrolling one child you can recognize gives `cluster` an
+anchor:
+
+```bash
+# Drop 5–10 clear photos of one known child into reference/, then:
+python enroll.py --reference reference/        # -> reference_embeddings.npy
+python faces.py cluster                         # readout: do those faces land
+                                                #   in ONE clean cluster?
+```
+
+The readout's goal: the reference faces concentrate in a single cluster that's
+almost all reference — split across many clusters means raise `--eps`; mixed with
+other kids means lower it. Check the "reference-to-reference similarity" that
+`enroll.py` prints too: if one photo barely matches the others, it's probably the
+wrong kid or a bad shot — remove it and re-enroll. Once the clustering is dialed
+in and labeled, you don't need this again for routine re-runs.
+
+A tightly-cropped close-up where the face fills the frame can *fail* to detect at
+a large `det-size` (the upscaled face exceeds the detector's anchor range), so
+`enroll.py` defaults to a **smaller** `det-size` (640) than `embed`. If an
+obviously-clear reference reports "no face detected," it's cropped too tight —
+give it margin, or lower `enroll.py --det-size`.
+
 ## When you're done
 
-There are two ways to get photos out:
-
-- **`query`** for exports you want to repeat the same way, e.g. one folder per
-  child: `python faces.py query --with ada --zip`.
-- **`serve`** to browse and filter, then **Export zip** (originals, or 2048px
-  JPEGs). The zip downloads through your browser.
+Get photos out with **Export zip** in the gallery (see *Sending photos to a
+parent*); the zip downloads through your browser. For exports split into
+folders, or ones you want to repeat the same way, use `query` (see *Advanced*).
 
 Deleting `album/` does not delete the face data: face embeddings, montages, names
 and thumbnails of every child are in `work/`. To delete all of it but keep the
