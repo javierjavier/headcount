@@ -1977,6 +1977,15 @@ function loadState() {
 }
 loadState();
 
+// Filters carried over from an earlier visit get their own lead in the Filtering
+// bar, so a narrowed grid on arrival has an obvious cause. sessionStorage survives
+// reloads (chip removal reloads) but not a new tab/visit, which is the distinction.
+let fromLastVisit = false;
+try {
+  fromLastVisit = !sessionStorage.getItem("headcount.visit");
+  sessionStorage.setItem("headcount.visit", "1");
+} catch (e) {}
+
 const $ = id => document.getElementById(id);
 const dayOf = it => it.dt ? it.dt.slice(0,10).replace(/:/g,"-") : "";        // "2026-06-11" or ""
 function prettyDay(d) {
@@ -2074,7 +2083,8 @@ function renderActive() {
   const box = $("active"); box.innerHTML = "";
   const active = activeFilters();
   if (!active.length) return;                                  // :empty hides the row
-  const lead = document.createElement("span"); lead.className = "lead"; lead.textContent = "Filtering:";
+  const lead = document.createElement("span"); lead.className = "lead";
+  lead.textContent = fromLastVisit ? "Restored from your last visit:" : "Filtering:";
   box.appendChild(lead);
   for (const [label, clear, reloads] of active) {
     const chip = document.createElement("span"); chip.className = "chip";
@@ -2115,7 +2125,10 @@ function resetFilters() {
 }
 
 let current = [];
+let rendered = false;
 function render() {
+  if (rendered) fromLastVisit = false;                     // any change after load is this visit's
+  rendered = true;
   saveState();
   renderActive();
   updateNameCounts(); updateFolderCounts();   // facet counts track the live filter set
