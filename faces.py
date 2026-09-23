@@ -2045,22 +2045,47 @@ const warmIO = ("IntersectionObserver" in window) ? new IntersectionObserver((en
   for (const e of entries) if (e.isIntersecting) { warm(e.target.dataset.k); warmIO.unobserve(e.target); }
 }, { rootMargin: "300px" }) : null;
 
-// active name filters shown above the count, each removable; plus "Clear all"
+// every active filter shown above the count, each removable; plus "Clear all".
+// Listing only names here once hid sidebar filters restored from a past visit, so
+// "Filtering: rio" showed 9 of rio's 160 items with no hint why.
+function activeFilters() {
+  const out = [];                                          // [label, clear-fn, reloads?]
+  for (const n of [...S.names].sort()) out.push([n, () => { S.names.delete(n); }, false]);
+  const pad = h => String(h).padStart(2, "0");
+  if (S.hmin !== HMIN || S.hmax !== HMAX)
+    out.push([pad(S.hmin) + ":00 – " + pad(S.hmax) + ":59", () => { S.hmin = HMIN; S.hmax = HMAX; }, true]);
+  if (S.dmin !== DMIN || S.dmax !== DMAX)
+    out.push([prettyDayShort(DAYS[S.dmin]) + " – " + prettyDayShort(DAYS[S.dmax]), () => { S.dmin = DMIN; S.dmax = DMAX; }, true]);
+  if (S.fmin !== FCMIN || S.fmax !== FCMAX)
+    out.push([S.fmin === S.fmax ? S.fmin + (S.fmin === 1 ? " face" : " faces") : S.fmin + " – " + S.fmax + " faces",
+              () => { S.fmin = FCMIN; S.fmax = FCMAX; }, true]);
+  if (S.scene) out.push([S.scene, () => { S.scene = ""; }, true]);
+  const hidden = [["photo", "photos"], ["live", "live photos"], ["video", "videos"]].filter(([k]) => !S.media[k]);
+  if (hidden.length)
+    out.push(["no " + hidden.map(([, l]) => l).join(", "), () => { S.media = { photo:true, live:true, video:true }; }, true]);
+  if (S.foldersOff.size)
+    out.push([S.foldersOff.size + (S.foldersOff.size === 1 ? " folder" : " folders") + " hidden", () => { S.foldersOff = new Set(); }, true]);
+  if (S.collapsedDays.size)
+    out.push([S.collapsedDays.size + (S.collapsedDays.size === 1 ? " day" : " days") + " collapsed", () => { S.collapsedDays = new Set(); }, false]);
+  return out;
+}
+
 function renderActive() {
   const box = $("active"); box.innerHTML = "";
-  const names = [...S.names].sort();
-  if (!names.length) return;                                   // :empty hides the row
+  const active = activeFilters();
+  if (!active.length) return;                                  // :empty hides the row
   const lead = document.createElement("span"); lead.className = "lead"; lead.textContent = "Filtering:";
   box.appendChild(lead);
-  for (const n of names) {
+  for (const [label, clear, reloads] of active) {
     const chip = document.createElement("span"); chip.className = "chip";
-    chip.append(document.createTextNode(n));
-    const x = document.createElement("button"); x.type = "button"; x.textContent = "\\u00d7"; x.title = "Remove " + n;
-    x.onclick = () => { S.names.delete(n); buildNames(); render(); };
+    chip.append(document.createTextNode(label));
+    const x = document.createElement("button"); x.type = "button"; x.textContent = "\\u00d7"; x.title = "Remove " + label;
+    // sidebar sliders/checkboxes re-init from state on load, same as resetFilters
+    x.onclick = () => { clear(); if (reloads) { saveState(); location.reload(); } else { buildNames(); render(); } };
     chip.appendChild(x); box.appendChild(chip);
   }
   const clr = document.createElement("button"); clr.type = "button"; clr.className = "clear"; clr.textContent = "Clear all";
-  clr.onclick = () => { S.names.clear(); buildNames(); render(); };
+  clr.onclick = resetFilters;
   box.appendChild(clr);
 }
 
