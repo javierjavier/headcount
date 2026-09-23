@@ -57,9 +57,11 @@ from pathlib import Path
 import numpy as np
 
 from common import (
+    WORK,
     ArchiveFoundError,
     build_face_app,
     empty_hint,
+    ensure_work_dir,
     list_images,
     list_videos,
     load_image_bgr,
@@ -3149,7 +3151,7 @@ def main() -> int:
 
     p_emb = sub.add_parser("embed", help="detect+embed every face -> faces.csv/.npy (slow, once)")
     p_emb.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_emb.add_argument("--faces", default="faces.csv", help="face table output (default: faces.csv)")
+    p_emb.add_argument("--faces", default=f"{WORK}/faces.csv", help="face table output (default: work/faces.csv)")
     p_emb.add_argument("--det-size", type=int, default=1024, help="detector input size (default: 1024)")
     p_emb.add_argument("--det-thresh", type=float, default=0.4, help="detector confidence (default: 0.4)")
     p_emb.add_argument("--prefetch", type=int, default=2,
@@ -3161,8 +3163,8 @@ def main() -> int:
     p_emb.set_defaults(func=cmd_embed)
 
     p_clu = sub.add_parser("cluster", help="group faces by identity -> clusters.csv (re-runnable)")
-    p_clu.add_argument("--faces", default="faces.csv", help="face table (default: faces.csv)")
-    p_clu.add_argument("--out", default="clusters.csv", help="cluster assignment output")
+    p_clu.add_argument("--faces", default=f"{WORK}/faces.csv", help="face table (default: work/faces.csv)")
+    p_clu.add_argument("--out", default=f"{WORK}/clusters.csv", help="cluster assignment output")
     p_clu.add_argument("--algo", choices=["hdbscan", "dbscan"], default="hdbscan",
                        help="clustering algorithm (default: hdbscan; dbscan for small/dense sets)")
     p_clu.add_argument("--min-cluster-size", type=int, default=15,
@@ -3173,16 +3175,16 @@ def main() -> int:
                        help="core-point neighbours; 0=auto (default)")
     p_clu.add_argument("--min-size", type=int, default=40, help="pre-filter: min bbox side in px (default: 40)")
     p_clu.add_argument("--min-det", type=float, default=0.5, help="pre-filter: min det_score (default: 0.5)")
-    p_clu.add_argument("--refs", default="reference_embeddings.npy", help="enrolled refs for calibration readout")
+    p_clu.add_argument("--refs", default=f"{WORK}/reference_embeddings.npy", help="enrolled refs for calibration readout")
     p_clu.add_argument("--ref-thresh", type=float, default=0.35, help="sim>= this counts as the reference person")
     p_clu.set_defaults(func=cmd_cluster)
 
     p_rev = sub.add_parser("review", help="montage each cluster + skeleton labels.csv to name them")
     p_rev.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_rev.add_argument("--faces", default="faces.csv", help="face table (default: faces.csv)")
-    p_rev.add_argument("--clusters", default="clusters.csv", help="cluster assignment (default: clusters.csv)")
-    p_rev.add_argument("--out", default="clusters", help="montage output folder (default: clusters/)")
-    p_rev.add_argument("--labels", default="labels.csv", help="skeleton label file to fill in")
+    p_rev.add_argument("--faces", default=f"{WORK}/faces.csv", help="face table (default: work/faces.csv)")
+    p_rev.add_argument("--clusters", default=f"{WORK}/clusters.csv", help="cluster assignment (default: work/clusters.csv)")
+    p_rev.add_argument("--out", default=f"{WORK}/clusters", help="montage output folder (default: work/clusters/)")
+    p_rev.add_argument("--labels", default=f"{WORK}/labels.csv", help="skeleton label file to fill in")
     p_rev.add_argument("--per-cluster", type=int, default=25, help="faces shown per montage (default: 25)")
     p_rev.add_argument("--cols", type=int, default=5, help="montage grid columns (default: 5)")
     p_rev.add_argument("--thumb", type=int, default=110, help="thumbnail px per face (default: 110)")
@@ -3191,10 +3193,10 @@ def main() -> int:
 
     p_asg = sub.add_parser("assign", help="labels.csv -> image_people.csv (+ optional by_child/ folders)")
     p_asg.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_asg.add_argument("--faces", default="faces.csv", help="face table (default: faces.csv)")
-    p_asg.add_argument("--clusters", default="clusters.csv", help="cluster assignment (default: clusters.csv)")
-    p_asg.add_argument("--labels", default="labels.csv", help="filled-in labels (default: labels.csv)")
-    p_asg.add_argument("--out", default="image_people.csv", help="who-is-in-each-photo index")
+    p_asg.add_argument("--faces", default=f"{WORK}/faces.csv", help="face table (default: work/faces.csv)")
+    p_asg.add_argument("--clusters", default=f"{WORK}/clusters.csv", help="cluster assignment (default: work/clusters.csv)")
+    p_asg.add_argument("--labels", default=f"{WORK}/labels.csv", help="filled-in labels (default: work/labels.csv)")
+    p_asg.add_argument("--out", default=f"{WORK}/image_people.csv", help="who-is-in-each-photo index")
     p_asg.add_argument("--folders", nargs="?", const="by_child", default="",
                        help="also write per-child folders here (default dir: by_child/)")
     p_asg.add_argument("--names", default="", help="with --folders, only these names (comma list)")
@@ -3212,7 +3214,7 @@ def main() -> int:
 
     p_qry = sub.add_parser("query", help="set queries over image_people.csv (e.g. --with Ada,Ben)")
     p_qry.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_qry.add_argument("--image-people", default="image_people.csv", help="index from `assign`")
+    p_qry.add_argument("--image-people", default=f"{WORK}/image_people.csv", help="index from `assign`")
     p_qry.add_argument("--with", dest="with_", default="", help="all of these present (comma list)")
     p_qry.add_argument("--any", default="", help="at least one of these present")
     p_qry.add_argument("--without", default="", help="none of these present")
@@ -3226,7 +3228,7 @@ def main() -> int:
                        help="with --where/--split-scene, proceed even if scene.csv is missing some "
                             "matches (else the query aborts on a stale scene.csv); untagged photos "
                             "go to unscored/")
-    p_qry.add_argument("--scene", default="scene.csv", help="scene index from `scene`")
+    p_qry.add_argument("--scene", default=f"{WORK}/scene.csv", help="scene index from `scene`")
     p_qry.add_argument("--split-size", action="store_true",
                        help="fan matches into candid/ (<--large-min faces) and large-group/ "
                             "subfolders by detected-face count (mutually exclusive with --split-scene). "
@@ -3241,11 +3243,11 @@ def main() -> int:
                             "them for max precision (folder gets __clustered); split=route them into a "
                             "recovered/ subfolder for separate review (no recall lost). drop/split read "
                             "--clusters + --labels.")
-    p_qry.add_argument("--faces", default="faces.csv",
+    p_qry.add_argument("--faces", default=f"{WORK}/faces.csv",
                        help="face table from `embed` (for --split-size counts)")
-    p_qry.add_argument("--clusters", default="clusters.csv",
+    p_qry.add_argument("--clusters", default=f"{WORK}/clusters.csv",
                        help="cluster assignment from `cluster` (for --confirmed-only)")
-    p_qry.add_argument("--labels", default="labels.csv",
+    p_qry.add_argument("--labels", default=f"{WORK}/labels.csv",
                        help="cluster names from `review` (for --confirmed-only)")
     p_qry.add_argument("--out", default="query", help="output base folder (default: query/)")
     p_qry.add_argument("--copy", action="store_true", help="real HEIC copies instead of symlinks")
@@ -3263,14 +3265,14 @@ def main() -> int:
 
     p_scn = sub.add_parser("scene", help="tag each photo indoor/outdoor (foliage+sky) -> scene.csv")
     p_scn.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_scn.add_argument("--faces", default="faces.csv", help="limit to images in this face table ('' = all)")
-    p_scn.add_argument("--out", default="scene.csv", help="scene index output (default: scene.csv)")
+    p_scn.add_argument("--faces", default=f"{WORK}/faces.csv", help="limit to images in this face table ('' = all)")
+    p_scn.add_argument("--out", default=f"{WORK}/scene.csv", help="scene index output (default: work/scene.csv)")
     p_scn.add_argument("--method", choices=["green", "time", "both"], default="time",
                        help="time=hour window (default; instant, no decode, best when the "
                             "daily schedule is rigid), green=foliage/sky colour, both=AND")
     p_scn.add_argument("--outdoor-hours", default="10-11",
                        help="outdoor hour window for time/both, e.g. 10-11 (default: 10-11)")
-    p_scn.add_argument("--overrides", default="scene_overrides.csv",
+    p_scn.add_argument("--overrides", default=f"{WORK}/scene_overrides.csv",
                        help="per-folder scene overrides (CSV: subdir,scene) applied "
                             "after classification; forces off-schedule folders (e.g. a "
                             "4pm graduation) to a fixed tag that survives full re-runs")
@@ -3288,10 +3290,10 @@ def main() -> int:
     p_vid = sub.add_parser("video",
                            help="detect + name faces in album videos -> video_people.csv (uses existing labels)")
     p_vid.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_vid.add_argument("--faces", default="faces.csv", help="face table (default: faces.csv)")
-    p_vid.add_argument("--clusters", default="clusters.csv", help="cluster assignment (default: clusters.csv)")
-    p_vid.add_argument("--labels", default="labels.csv", help="filled-in labels (default: labels.csv)")
-    p_vid.add_argument("--out", default="video_people.csv", help="who-is-in-each-video index")
+    p_vid.add_argument("--faces", default=f"{WORK}/faces.csv", help="face table (default: work/faces.csv)")
+    p_vid.add_argument("--clusters", default=f"{WORK}/clusters.csv", help="cluster assignment (default: work/clusters.csv)")
+    p_vid.add_argument("--labels", default=f"{WORK}/labels.csv", help="filled-in labels (default: work/labels.csv)")
+    p_vid.add_argument("--out", default=f"{WORK}/video_people.csv", help="who-is-in-each-video index")
     p_vid.add_argument("--fps", type=float, default=1.0,
                        help="frames sampled per second of video (default: 1.0)")
     p_vid.add_argument("--max-frames", type=int, default=0,
@@ -3310,13 +3312,13 @@ def main() -> int:
 
     p_srv = sub.add_parser("serve", help="local web browser: name/time filters + zip export (localhost only)")
     p_srv.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_srv.add_argument("--image-people", default="image_people.csv", help="index from `assign`")
-    p_srv.add_argument("--faces", default="faces.csv",
+    p_srv.add_argument("--image-people", default=f"{WORK}/image_people.csv", help="index from `assign`")
+    p_srv.add_argument("--faces", default=f"{WORK}/faces.csv",
                        help="face index from `embed` — powers the face-count filter (optional)")
-    p_srv.add_argument("--scene", default="scene.csv", help="scene/hour index from `scene` (optional)")
-    p_srv.add_argument("--video-people", default="video_people.csv",
+    p_srv.add_argument("--scene", default=f"{WORK}/scene.csv", help="scene/hour index from `scene` (optional)")
+    p_srv.add_argument("--video-people", default=f"{WORK}/video_people.csv",
                        help="per-video name index from `video` (optional)")
-    p_srv.add_argument("--cache", default=".serve_cache", help="thumbnail cache dir (default: .serve_cache/)")
+    p_srv.add_argument("--cache", default=f"{WORK}/serve_cache", help="thumbnail cache dir (default: work/serve_cache/)")
     p_srv.add_argument("--thumb", type=int, default=768, help="thumbnail long edge in px (default: 768)")
     p_srv.add_argument("--prefetch", type=int, default=4, help="background decode threads for thumbs (default: 4)")
     p_srv.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1 — localhost only)")
@@ -3330,6 +3332,8 @@ def main() -> int:
     p_srv.set_defaults(func=cmd_serve)
 
     args = ap.parse_args()
+    for moved in ensure_work_dir():
+        print(f"moved {moved}")
 
     if getattr(args, "rescan", False):
         faces_csv = Path(args.faces)

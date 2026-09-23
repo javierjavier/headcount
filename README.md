@@ -46,10 +46,16 @@ album/       # [PUT THE FULL SET OF PHOTOS HERE]
              #   archive left in album/ is a hard error — unzip into a subfolder.
 reference/   # optional: a few clear photos of one known child, used only for
              #   cold-start cluster calibration (see enroll below)
-clusters/    # created by `review` — one montage per cluster, for labeling
+work/        # created on first run — everything the tool generates from the
+             #   album: face data, montages (work/clusters/), work/labels.csv,
+             #   the gallery's thumbnail cache. Delete it with album/ to remove
+             #   every trace of the photos.
 by_child/    # created by `assign --folders` (opt-in) — one folder per named child
 query/       # created by `query` — the slices you pull out
 ```
+
+Checkouts from before `work/` existed kept these files at the top level; the
+first run moves them into `work/` and prints what it moved.
 
 ## Workflow (`faces.py`)
 
@@ -75,8 +81,8 @@ python faces.py cluster
 python faces.py review
 
 # 4. label — name each cluster in labels.csv. See "Labeling" below the workflow.
-open clusters                                  # look at the montages
-open -e labels.csv                             # edit in TextEdit, not Numbers
+open work/clusters                             # look at the montages
+open -e work/labels.csv                        # edit in TextEdit, not Numbers
 
 # 5. assign — who's in each photo -> image_people.csv (+ per-child counts).
 #    Noise recovery is ON by default: pulls noise/profile faces into their nearest
@@ -122,7 +128,7 @@ python faces.py video --fps 2 --limit 20       # denser sampling; first 20 clips
 # 7. serve — browse the whole album in a localhost-only web gallery instead of
 #    Finder: name + time-of-day filters, a preview-size slider, and zip export
 #    (originals, or re-encoded 2048px JPEGs). Nothing leaves the machine; it
-#    binds 127.0.0.1 only. First run builds a thumbnail cache (.serve_cache/),
+#    binds 127.0.0.1 only. First run builds a thumbnail cache (work/serve_cache/),
 #    which is the slow part (re-decodes each HEIC); the browser opens right away
 #    and shows progress, then loads the gallery. Later runs reuse the cache.
 #    Videos in album/ also appear in the grid (play inline in the lightbox);
@@ -136,7 +142,7 @@ python faces.py serve --no-videos              # photos only
 ### Labeling (step 4)
 
 `cluster` sorts every face into groups it thinks are the same person. `review`
-then writes one montage per group into `clusters/`: a 5×5 grid of up to 25 face
+then writes one montage per group into `work/clusters/`: a 5×5 grid of up to 25 face
 crops from that group. The filename tells you which group it is:
 
 ```
@@ -146,7 +152,7 @@ c00__cluster22__n209.jpg
  └─ rank 00 = biggest group (montages are sorted biggest first)
 ```
 
-`labels.csv` has one row per montage: the montage filename, then a comma. Look
+`work/labels.csv` has one row per montage: the montage filename, then a comma. Look
 at each montage and type a name after the comma of its row:
 
 ```
@@ -174,18 +180,18 @@ has to be quoted on the command line (`--with "ada b"`), so single words are
 easier.
 
 On a Mac, double-clicking `labels.csv` opens it in Numbers, which tries to save
-it as a `.numbers` file. Use `open -e labels.csv` to edit it in TextEdit instead,
+it as a `.numbers` file. Use `open -e work/labels.csv` to edit it in TextEdit instead,
 and save with ⌘S. You don't need to name every montage; name the children you
 care about, save, and run `python faces.py assign`.
 
 ### Gallery (`serve`)
 
-Previews come from `.serve_cache/` thumbnails built at `--thumb` long-edge
+Previews come from `work/serve_cache/` thumbnails built at `--thumb` long-edge
 (default 768). The grid fills cells by the photo's *short* edge and HiDPI/Retina
 screens want ~2× the CSS pixels, so a too-small thumb upscales and looks blurry —
 raise `--thumb` for crisper previews at the cost of build time and disk; lower it
 to save both. Changing the size rebuilds the cache automatically (it records the
-build size and clears stale thumbs); no manual `rm -rf .serve_cache` needed.
+build size and clears stale thumbs); no manual `rm -rf work/serve_cache` needed.
 
 #### Videos in the gallery
 
@@ -338,20 +344,16 @@ Plain `query` (no `--copy` or `--jpeg`) makes **symlinks** that point into
 `album/`. They stop working if you delete the album, so use `--copy` or `--jpeg`
 for anything you want to keep.
 
-Deleting `album/` does not delete the face data. Face embeddings, montages, names
-and thumbnails of every child in the album stay in this folder until you remove
-them. To delete all of it but keep the install for next time:
+Deleting `album/` does not delete the face data: face embeddings, montages, names
+and thumbnails of every child are in `work/`. To delete all of it but keep the
+install for next time:
 
 ```bash
-rm -rf album reference reference_embeddings.npy \
-       faces.csv faces.npy faces.emb faces.done faces.hashes \
-       clusters.csv clusters labels.csv image_people.csv \
-       video_people.csv video_people.done scene.csv \
-       query by_child .serve_cache
-find . -maxdepth 1 -name '*.bak' -delete
+rm -rf work album reference
 ```
 
-Copy your exports somewhere else first: `query/` is in that list.
+Your exports in `query/` and `by_child/` are photos of the children too. Delete
+them once you've copied out what you need.
 
 ## Files
 
@@ -362,6 +364,7 @@ Copy your exports somewhere else first: `query/` is in that list.
 | `common.py`               | Shared HEIC/EXIF loading, model setup, small utilities |
 | `requirements.txt`        | Dependencies                                       |
 | `DESIGN.md`               | Pipeline rationale, tradeoffs, hard cases          |
+| `work/`                   | Everything below marked *generated*, plus montages and the thumbnail cache |
 | `reference_embeddings.npy`| Enrolled calibration anchor (generated)            |
 | `faces.csv` / `faces.npy` | Every face's metadata + embedding (generated)      |
 | `faces.done`              | filenames already embedded, incl. zero-face images, for resume (generated) |

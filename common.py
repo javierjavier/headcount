@@ -35,6 +35,46 @@ VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
 ARCHIVE_EXTS = {".zip", ".tar", ".gz", ".tgz", ".7z", ".rar"}
 
 
+# Everything the tool generates from the album (face data, montages, labels, the
+# gallery's thumbnail cache) lives in this one folder, so deleting it and album/
+# removes every trace. Exports the user takes away (query/, by_child/) stay at
+# the top level.
+WORK = "work"
+
+# Files and folders earlier versions wrote at the top level, by default name.
+# ensure_work_dir moves them (and their review/cluster .bak copies) into WORK.
+_OLD_TOP_LEVEL = (
+    "faces.csv", "faces.npy", "faces.emb", "faces.done", "faces.hashes",
+    "clusters.csv", "labels.csv", "image_people.csv", "scene.csv",
+    "scene_overrides.csv", "video_people.csv", "video_people.done",
+    "reference_embeddings.npy", "clusters",
+)
+
+
+def ensure_work_dir(root: str | Path = ".") -> list[str]:
+    """Create WORK under *root*, first moving an older top-level layout into it.
+
+    Only runs the move when WORK doesn't exist yet, so it happens once and never
+    shuffles files the user put in WORK themselves. Returns what moved, as
+    "old -> new" strings, for the caller to print.
+    """
+    root = Path(root)
+    work = root / WORK
+    if work.exists():
+        return []
+    moves: dict[Path, Path] = {}   # keyed by source: `clusters*.bak` also matches clusters.csv.bak
+    for name in _OLD_TOP_LEVEL:
+        for p in [root / name, *sorted(root.glob(f"{name}*.bak"))]:
+            if p.exists():
+                moves[p] = work / p.name
+    if (root / ".serve_cache").is_dir():
+        moves[root / ".serve_cache"] = work / "serve_cache"
+    work.mkdir()
+    for src, dst in moves.items():
+        src.rename(dst)
+    return [f"{s.relative_to(root)} -> {d.relative_to(root)}" for s, d in moves.items()]
+
+
 class ArchiveFoundError(Exception):
     """An un-extracted archive was found under a folder being scanned for images.
 

@@ -5,7 +5,14 @@ matches/
 reference/
 known-positives/
 
-# Derived biometric data + generated artifacts
+# Everything generated from the album (face data, montages, names, thumbnails)
+work/
+# Exports you pull out of the album
+query*/
+by_child*/
+
+# Generated files from before work/ existed. The tool moves them into work/ on
+# its first run; they stay ignored so leftovers can never be committed.
 reference_embeddings.npy
 scores.csv
 # whole-class face database (clustering pipeline) — every child's biometric data
@@ -24,8 +31,6 @@ scene*.csv
 *.bak
 embed_full.log
 clusters*/
-by_child*/
-query*/
 validation_*.jpg
 # face-crop review sheets + their coordinate dumps (sweep/QA) — biometric
 suspect_*.jpg

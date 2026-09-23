@@ -421,6 +421,43 @@ def test_read_labels_bad_montage_on_blank_row_is_ignored(tmp_path):
     assert faces._read_labels(lp) == {5: "Ada"}
 
 
+# --- ensure_work_dir (moving the old top-level layout into work/) ----------
+
+def test_ensure_work_dir_moves_old_layout(tmp_path):
+    for n in ["faces.csv", "faces.npy", "clusters.csv", "clusters.csv.bak", "labels.csv",
+              "labels.csv.bak", "labels.csv_1.bak", "image_people.csv", "faces.py"]:
+        (tmp_path / n).write_text(n)
+    for d in ["clusters", ".serve_cache", "album", "query"]:
+        (tmp_path / d).mkdir()
+    (tmp_path / "clusters" / "c00__cluster1__n5.jpg").write_bytes(b"x")
+
+    moved = common.ensure_work_dir(tmp_path)
+
+    work = tmp_path / "work"
+    assert "labels.csv -> work/labels.csv" in moved
+    assert ".serve_cache -> work/serve_cache" in moved
+    for n in ["faces.csv", "faces.npy", "clusters.csv", "clusters.csv.bak", "labels.csv",
+              "labels.csv.bak", "labels.csv_1.bak", "image_people.csv"]:
+        assert (work / n).read_text() == n and not (tmp_path / n).exists()
+    assert (work / "clusters" / "c00__cluster1__n5.jpg").exists()
+    assert (work / "serve_cache").is_dir()
+    # code, the album and exports stay where they are
+    assert (tmp_path / "faces.py").exists() and (tmp_path / "album").is_dir()
+    assert (tmp_path / "query").is_dir()
+
+
+def test_ensure_work_dir_only_moves_once(tmp_path):
+    (tmp_path / "work").mkdir()
+    (tmp_path / "faces.csv").write_text("stray")
+    assert common.ensure_work_dir(tmp_path) == []
+    assert (tmp_path / "faces.csv").exists() and not (tmp_path / "work" / "faces.csv").exists()
+
+
+def test_ensure_work_dir_fresh_checkout_just_creates_it(tmp_path):
+    assert common.ensure_work_dir(tmp_path) == []
+    assert (tmp_path / "work").is_dir()
+
+
 # --- serve thumbnail keys --------------------------------------------------
 
 def test_thumb_keys_unique_stems_stay_bare():
