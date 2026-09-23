@@ -22,7 +22,7 @@ Phases:
           type a name per cluster; that's the actual tagging step.
 
   assign  From the filled-in labels.csv, compute who is in each photo ->
-          image_people.csv, and optionally sort copies/symlinks into by_child/.
+          image_people.csv, and optionally sort copies into by_child/.
 
   query   Set queries over image_people.csv, e.g. `--with Ada,Ben` (both
           present), `--any`, `--without`, `--only`, into query/<expr>/.
@@ -1065,8 +1065,8 @@ def _read_labels(path: Path) -> dict[int, str]:
     return out
 
 
-def _materialize(filenames, name: str, album: Path, base: Path, copy: bool) -> int:
-    """Put each file under base/name/ as a symlink (default) or real copy."""
+def _materialize(filenames, name: str, album: Path, base: Path) -> int:
+    """Copy each file into base/name/."""
     from common import _unique_path
 
     d = base / name
@@ -1081,10 +1081,7 @@ def _materialize(filenames, name: str, album: Path, base: Path, copy: bool) -> i
         # between subfolders (e.g. two reused IMG_4492.HEIC).
         dst = _unique_path(d / Path(fn).name)
         try:
-            if copy:
-                shutil.copy2(src, dst)
-            else:
-                dst.symlink_to(src)
+            shutil.copy2(src, dst)
             n += 1
         except Exception as e:  # noqa: BLE001
             print(f"  ! {fn} -> {name}: {e}")
@@ -1243,10 +1240,9 @@ def cmd_assign(args) -> int:
                 if names_filter and name not in names_filter:
                     continue
                 per_name.setdefault(name, []).append(fn)
-        kind = "copies" if args.copy else "symlinks"
-        print(f"\nWriting {kind} into {base}/<name>/ ...")
+        print(f"\nCopying into {base}/<name>/ ...")
         for name, fns in sorted(per_name.items()):
-            n = _materialize(fns, name, Path(args.album), base, args.copy)
+            n = _materialize(fns, name, Path(args.album), base)
             print(f"  {name}/: {n}")
     return 0
 
@@ -1452,10 +1448,8 @@ def _export_one(src: Path, fn: str, dstdir: Path, args) -> None:
         if exif:
             save_kw["exif"] = exif
         img.save(dst, "JPEG", **save_kw)
-    elif args.copy:
-        shutil.copy2(src, _unique_path(dstdir / Path(fn).name))
     else:
-        (_unique_path(dstdir / Path(fn).name)).symlink_to(src)
+        shutil.copy2(src, _unique_path(dstdir / Path(fn).name))
 
 
 def cmd_query(args) -> int:
@@ -1618,7 +1612,7 @@ def cmd_query(args) -> int:
         return 0
 
     # query results go directly in out/<label>/ (not nested under a name like
-    # by_child/), so we copy/symlink here rather than reuse _materialize.
+    # by_child/), so we copy here rather than reuse _materialize.
     #
     # Wipe-and-rewrite: out/<label>/ is named for this exact query, so it should
     # *be* its result set, not an append log. query is the fast re-runnable
@@ -1667,7 +1661,7 @@ def cmd_query(args) -> int:
             n += 1
         except Exception as e:  # noqa: BLE001 - one bad file shouldn't abort the query
             print(f"  ! {fn}: {e}")
-    kind = "jpegs" if args.jpeg else ("copies" if args.copy else "symlinks")
+    kind = "jpegs" if args.jpeg else "copies"
     print(f"Wrote {n} {kind} -> {out}/")
     if unscored:
         print(f"  ({unscored} had no scene tag -> {out}/unscored/)")
@@ -1681,8 +1675,7 @@ def cmd_query(args) -> int:
         import zipfile
 
         # Pack the materialized folder into a sibling <label>.zip, preserving the
-        # split-scene subfolders. is_file() follows symlinks, so symlinked results
-        # are stored as real content -- a zip is self-contained by definition.
+        # split-scene subfolders.
         zpath = out.with_name(out.name + ".zip")
         if zpath.exists():
             zpath.unlink()
@@ -3198,9 +3191,8 @@ def main() -> int:
     p_asg.add_argument("--labels", default=f"{WORK}/labels.csv", help="filled-in labels (default: work/labels.csv)")
     p_asg.add_argument("--out", default=f"{WORK}/image_people.csv", help="who-is-in-each-photo index")
     p_asg.add_argument("--folders", nargs="?", const="by_child", default="",
-                       help="also write per-child folders here (default dir: by_child/)")
+                       help="also copy each child's photos into folders here (default dir: by_child/)")
     p_asg.add_argument("--names", default="", help="with --folders, only these names (comma list)")
-    p_asg.add_argument("--copy", action="store_true", help="real copies instead of symlinks (uses disk)")
     p_asg.add_argument("--recover", action=argparse.BooleanOptionalAction, default=True,
                        help="pull noise/junk faces into their nearest named cluster "
                             "(boosts recall; on by default — strict thresh 0.45/margin 0.05 "
@@ -3250,7 +3242,6 @@ def main() -> int:
     p_qry.add_argument("--labels", default=f"{WORK}/labels.csv",
                        help="cluster names from `review` (for --confirmed-only)")
     p_qry.add_argument("--out", default="query", help="output base folder (default: query/)")
-    p_qry.add_argument("--copy", action="store_true", help="real HEIC copies instead of symlinks")
     p_qry.add_argument("--jpeg", action="store_true",
                        help="re-encode to JPEG (reliable Finder thumbnails; HEIC ones are flaky)")
     p_qry.add_argument("--max-size", type=int, default=0,

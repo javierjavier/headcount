@@ -89,13 +89,13 @@ open -e work/labels.csv                        # edit in TextEdit, not Numbers
 #    named cluster, lifting recall (~84%->97% for a well-photographed kid) at ~97%
 #    purity. --no-recover for strict named-clusters-only. --folders [dir] also sorts
 #    copies into by_child/<name>/ (opt-in, default off; a photo with 3 named kids
-#    lands in all 3 folders). --jpeg works here too.
+#    lands in all 3 folders).
 python faces.py assign
 python faces.py assign --folders               # also fan out into by_child/
 
-# 6. query — copy any slice into query/<expr>/. Default is symlinks; --copy for
-#    real HEIC files; --jpeg to re-encode (most reliable Finder thumbnails, since
-#    macOS thumbnails HEIC unreliably even as real copies). --jpeg also takes
+# 6. query — copy any slice into query/<expr>/ as the original files; --jpeg to
+#    re-encode (most reliable Finder thumbnails, since macOS thumbnails HEIC
+#    unreliably). --jpeg also takes
 #    --max-size N to downscale and --strip-exif to drop metadata.
 #    Each query/<expr>/ dir is wiped and rewritten per run, so it always reflects
 #    the current query.
@@ -111,7 +111,7 @@ python faces.py query --only ada,ben          # exactly those two
 #    --recovered drop    -> exclude them entirely (max precision; folder gets __clustered)
 #
 #    Repeatable "give a parent every clean photo of their kid" export:
-python faces.py query --with ada --split-size --recovered split --copy --zip
+python faces.py query --with ada --split-size --recovered split --zip
 #    -> query/with_ada/{candid,large-group,recovered}/ + a .zip alongside.
 #    'recovered/' holds the lower-confidence matches to skim before sending; use
 #    --recovered drop to omit them, or keep (default) to mix them into the bins.
@@ -336,13 +336,9 @@ the `serve` gallery (see *Videos in the gallery* above).
 There are two ways to get photos out:
 
 - **`query`** for exports you want to repeat the same way, e.g. one folder per
-  child: `python faces.py query --with ada --copy --zip`.
+  child: `python faces.py query --with ada --zip`.
 - **`serve`** to browse and filter, then **Export zip** (originals, or 2048px
   JPEGs). The zip downloads through your browser.
-
-Plain `query` (no `--copy` or `--jpeg`) makes **symlinks** that point into
-`album/`. They stop working if you delete the album, so use `--copy` or `--jpeg`
-for anything you want to keep.
 
 Deleting `album/` does not delete the face data: face embeddings, montages, names
 and thumbnails of every child are in `work/`. To delete all of it but keep the
