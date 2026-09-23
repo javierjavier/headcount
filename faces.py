@@ -505,6 +505,10 @@ def cmd_cluster(args) -> int:
             min_cluster_size=args.min_cluster_size,
             min_samples=(args.min_samples or None),
             metric="euclidean",
+            # astype() below already hands HDBSCAN a fresh array, so letting it
+            # work in place is safe; saying so silences sklearn's warning that the
+            # default flips to copy=True in 1.10.
+            copy=False,
         ).fit_predict(X.astype(np.float64))
         params = f"hdbscan min_cluster_size={args.min_cluster_size}"
     else:
