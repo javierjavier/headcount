@@ -89,6 +89,17 @@ def test_confirmed_ok_empty_targets_pass():
     assert faces._confirmed_ok(set(), set(), set(), set()) is True
 
 
+# --- clustered_names_by_file (query --recovered, gallery confident box) ------
+
+def test_clustered_names_by_file():
+    rows = [{"face_id": "0", "filename": "a.jpg"}, {"face_id": "1", "filename": "a.jpg"},
+            {"face_id": "2", "filename": "b.jpg"}, {"face_id": "3", "filename": "c.jpg"}]
+    # face 1 is noise (-1), face 3's cluster is unnamed, face 2 has no cluster row.
+    clusters = {"0": 5, "1": -1, "3": 7}
+    got = faces.clustered_names_by_file(rows, clusters, {5: "Ada", 7: ""})
+    assert dict(got) == {"a.jpg": {"Ada"}}
+
+
 # --- _name_set / _parse_hours ----------------------------------------------
 
 def test_name_set_strips_and_drops_empties():

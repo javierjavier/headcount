@@ -215,6 +215,14 @@ outright is a real recall trade. Hence three policies:
 
 `drop`/`split` read `--clusters` + `--labels` to know which faces are clustered.
 
+The gallery's **confident matches only** box is `drop` applied to the name
+filter: `serve` sends each photo's recovery-only names (`clustered_names_by_file`,
+shared with `query`) and the page ignores them when the box is ticked. The box
+is on the main path for sending photos to a parent, because a wrong-child photo
+sent to another family is the costly error. Video names are all nearest-centroid
+matches, so the box never counts them. `split` has no gallery equivalent; the
+gallery exports one flat zip.
+
 ### Caveat: AND queries have lower recall
 
 A photo qualifies for `--with Ada,Ben` only if *both* faces were detected,
