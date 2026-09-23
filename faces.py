@@ -1529,6 +1529,24 @@ def _confirmed_ok(clustered: set, want: set, any_of: set, only: set) -> bool:
     return True
 
 
+def clustered_names_by_file(face_rows: list[dict], clusters: dict[str, int],
+                            labels: dict[int, str]) -> dict[str, set]:
+    """filename -> the names with a *clustered* face in that photo.
+
+    A name `assign` lists for a photo but that is missing here was attached only by
+    noise recovery, the main false-positive source. `query --recovered` and the
+    gallery's "confident matches only" box both leave those out.
+    """
+    from collections import defaultdict
+
+    out: dict[str, set] = defaultdict(set)
+    for r in face_rows:
+        name = labels.get(clusters.get(r["face_id"], -2))
+        if name:
+            out[r["filename"]].add(name)
+    return out
+
+
 def _export_one(src: Path, fn: str, dstdir: Path, args) -> None:
     """Materialize one source image into *dstdir* per the query's output mode.
 
@@ -1561,7 +1579,7 @@ def _export_one(src: Path, fn: str, dstdir: Path, args) -> None:
 
 
 def cmd_query(args) -> int:
-    from collections import Counter, defaultdict
+    from collections import Counter
 
     ip = Path(args.image_people)
     if not ip.exists():
@@ -1641,12 +1659,8 @@ def cmd_query(args) -> int:
         except ValueError as e:
             print(e, file=sys.stderr)
             return 1
-        file_of = {r["face_id"]: r["filename"] for r in read_face_rows(faces_path)}
-        clustered_names = defaultdict(set)
-        for r in read_face_rows(clu_path):
-            nm = cluster_name.get(int(r["cluster_id"]))
-            if nm and (fn := file_of.get(r["face_id"])):
-                clustered_names[fn].add(nm)
+        cmap = {r["face_id"]: int(r["cluster_id"]) for r in read_face_rows(clu_path)}
+        clustered_names = clustered_names_by_file(read_face_rows(faces_path), cmap, cluster_name)
 
     name_matched = [
         fn for fn, names in data.items()
@@ -2054,6 +2068,8 @@ SERVE_PAGE = """<!doctype html>
   .modes { display:flex; gap:14px; margin-top:8px; color:var(--muted); }
   .modes.col { flex-direction:column; gap:6px; align-items:flex-start; }
   .modes label { display:flex; gap:5px; align-items:center; cursor:pointer; }
+  .confident { display:flex; gap:5px; align-items:center; margin-top:8px; color:var(--muted); cursor:pointer; }
+  .confident[hidden] { display:none; }
   /* dual-thumb range: two transparent sliders overlaid on one shared track */
   .rangewrap { position:relative; height:20px; margin:10px 8px 0; }
   .rangewrap .track { position:absolute; top:50%; left:0; right:0; height:4px; transform:translateY(-50%); background:var(--line); border-radius:2px; }
@@ -2148,6 +2164,7 @@ SERVE_PAGE = """<!doctype html>
       <label><input type="radio" name="mode" value="all" checked> all of</label>
       <label><input type="radio" name="mode" value="any"> any of</label>
     </div>
+    <label class="confident" id="confwrap" title="Only count a name where that child's face was grouped with their other photos. Leaves out the lower-confidence matches, which are where most wrong-child photos come from. Use this for photos you send to another family. Videos never count as confident."><input type="checkbox" id="confident"> confident matches only</label>
     <select id="nsort" style="margin-top:8px">
       <option value="az">Name A → Z</option>
       <option value="za">Name Z → A</option>
@@ -2236,7 +2253,7 @@ SERVE_PAGE = """<!doctype html>
 <script>
 const DATA = __MANIFEST__;
 document.getElementById("vstale").hidden = !DATA.videoStale;
-const S = { names:new Set(), mode:"all", fmin:0, fmax:0, hmin:0, hmax:23, dmin:0, dmax:0, scene:"", media:{photo:true, live:true, video:true}, foldersOff:new Set(), foldOpen:false, collapsedDays:new Set(), search:"", sort:"new", nsort:"az", cell:150 };
+const S = { names:new Set(), mode:"all", confident:false, fmin:0, fmax:0, hmin:0, hmax:23, dmin:0, dmax:0, scene:"", media:{photo:true, live:true, video:true}, foldersOff:new Set(), foldOpen:false, collapsedDays:new Set(), search:"", sort:"new", nsort:"az", cell:150 };
 // album subfolders present in the data (""=album root). Stored as an *exclude*
 // set so the default (nothing excluded) shows everything and a freshly imported
 // subfolder is visible without clearing saved filters.
@@ -2270,7 +2287,7 @@ S.fmin = FCMIN; S.fmax = FCMAX;
 const SKEY = "headcount.filters.v1";
 function saveState() {
   try { localStorage.setItem(SKEY, JSON.stringify({
-    names:[...S.names], mode:S.mode, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, dlo:DAYS[S.dmin] || "", dhi:DAYS[S.dmax] || "", scene:S.scene, media:S.media, foldersOff:[...S.foldersOff], foldOpen:S.foldOpen, collapsedDays:[...S.collapsedDays], sort:S.sort, nsort:S.nsort, cell:S.cell
+    names:[...S.names], mode:S.mode, confident:S.confident, fmin:S.fmin, fmax:S.fmax, hmin:S.hmin, hmax:S.hmax, dlo:DAYS[S.dmin] || "", dhi:DAYS[S.dmax] || "", scene:S.scene, media:S.media, foldersOff:[...S.foldersOff], foldOpen:S.foldOpen, collapsedDays:[...S.collapsedDays], sort:S.sort, nsort:S.nsort, cell:S.cell
   })); } catch (e) {}
 }
 function loadState() {
@@ -2279,6 +2296,7 @@ function loadState() {
   const known = new Set(DATA.names);                              // drop names absent from this album
   if (Array.isArray(v.names)) S.names = new Set(v.names.filter(n => known.has(n)));
   if (v.mode === "all" || v.mode === "any") S.mode = v.mode;
+  if (typeof v.confident === "boolean" && DATA.confident) S.confident = v.confident;
   if (typeof v.fmin === "number") S.fmin = Math.min(Math.max(v.fmin, FCMIN), FCMAX);   // clamp to data bounds
   if (typeof v.fmax === "number") S.fmax = Math.min(Math.max(v.fmax, FCMIN), FCMAX);
   if (S.fmin > S.fmax) { S.fmin = FCMIN; S.fmax = FCMAX; }
@@ -2344,9 +2362,11 @@ function prettyTime(dt) {                           // "2026:06:03 09:23:03" -> 
 // true when `it` satisfies the name filter for an explicit name set (empty set =
 // no constraint). Pulled out so the facet counters can ask the same question for
 // a hypothetical selection (e.g. "current names plus this one").
+// With "confident matches only", a name found only by assign's noise recovery
+// (it.r) doesn't count — same rule as `query --recovered drop`.
 function nameSetMatch(it, set, mode) {
   if (!set.size) return true;
-  const has = it.n.filter(n => set.has(n)).length;
+  const has = it.n.filter(n => set.has(n) && !(S.confident && it.r.includes(n))).length;
   return mode === "all" ? has >= set.size : has > 0;
 }
 
@@ -2390,6 +2410,7 @@ const warmIO = ("IntersectionObserver" in window) ? new IntersectionObserver((en
 function activeFilters() {
   const out = [];                                          // [label, clear-fn, reloads?]
   for (const n of [...S.names].sort()) out.push([n, () => { S.names.delete(n); }, false]);
+  if (S.confident) out.push(["confident matches only", () => { S.confident = false; }, true]);
   const pad = h => String(h).padStart(2, "0");
   if (S.hmin !== HMIN || S.hmax !== HMAX)
     out.push([pad(S.hmin) + ":00 – " + pad(S.hmax) + ":59", () => { S.hmin = HMIN; S.hmax = HMAX; }, true]);
@@ -2432,7 +2453,7 @@ function renderActive() {
 // true when anything narrows the view from its default (drives the Reset button's
 // enabled state). Display prefs (sort, preview size, name-list order) don't count.
 function filtersActive() {
-  return S.names.size > 0
+  return S.names.size > 0 || S.confident
     || S.fmin !== FCMIN || S.fmax !== FCMAX
     || S.hmin !== HMIN || S.hmax !== HMAX
     || S.dmin !== DMIN || S.dmax !== DMAX
@@ -2444,7 +2465,7 @@ function filtersActive() {
 // clear every filter + view-narrowing setting, then reload so each widget re-inits
 // from the cleared state (cheaper and far less error-prone than re-syncing ~12 controls).
 function resetFilters() {
-  S.names = new Set(); S.mode = "all"; S.search = "";
+  S.names = new Set(); S.mode = "all"; S.confident = false; S.search = "";
   S.fmin = FCMIN; S.fmax = FCMAX;
   S.hmin = HMIN; S.hmax = HMAX;
   S.dmin = DMIN; S.dmax = DMAX;
@@ -2718,6 +2739,9 @@ if (FCMIN === FCMAX) {
   fmax.oninput = e => { S.fmax = Math.max(+e.target.value, S.fmin); e.target.value = S.fmax; faceLabel(); updFFill(); render(); };
   faceLabel(); updFFill();
 }
+$("confwrap").hidden = !DATA.confident;
+$("confident").checked = S.confident;
+$("confident").onchange = e => { S.confident = e.target.checked; render(); };
 $("scene").value = S.scene;
 $("scene").onchange = e => { S.scene = e.target.value; render(); };
 for (const cb of document.querySelectorAll('#media input[type=checkbox]')) {
@@ -3104,6 +3128,21 @@ def cmd_serve(args) -> int:
                 fc[r["filename"]] += 1
             face_counts = dict(fc)
 
+        # Names each photo has only through assign's noise recovery (no clustered
+        # face), for the "confident matches only" box — the gallery's version of
+        # `query --recovered drop`. None when clusters/faces can't be read: the box
+        # is then hidden rather than silently treating every name as confident.
+        clustered: dict[str, set] | None = None
+        if final and fcsv.exists():
+            try:
+                frows = read_face_rows(fcsv)
+                clustered = clustered_names_by_file(
+                    frows, load_cluster_map(frows, Path(args.clusters)), _read_labels(labels_path))
+            except (OSError, ValueError) as e:
+                print(f"  ! can't tell confident matches from recovered ones ({e}); "
+                      "hiding the \"confident matches only\" box.")
+        state["confident"] = clustered is not None
+
         # Optional scene/hour overlay — present iff a `scene` pass has been run.
         hours, scenes = {}, {}
         sp = Path(args.scene)
@@ -3168,6 +3207,7 @@ def cmd_serve(args) -> int:
         by_key.clear()
         for fn, names in visible:
             it = {"k": keys[fn], "f": fn, "n": names,
+                  "r": sorted(set(names) - clustered.get(fn, set())) if clustered is not None else [],
                   "fc": face_counts.get(fn),  # None when not in faces.csv -> unknown count
                   "h": hours.get(fn), "s": scenes.get(fn, ""), "v": False}
             items.append(it)
@@ -3180,7 +3220,9 @@ def cmd_serve(args) -> int:
             # clip with several kids show up under a "1–2 faces" filter. A video the
             # `video` pass never scanned has no entry -> null -> always passes.
             names_v = vpeople.get(fn)
-            it = {"k": keys[fn], "f": fn, "n": names_v or [],
+            # Every video name is a nearest-centroid match (assign's recovery rule),
+            # never a clustered face, so none of them count as confident.
+            it = {"k": keys[fn], "f": fn, "n": names_v or [], "r": names_v or [],
                   "fc": len(names_v) if names_v is not None else None,
                   "h": None, "s": "", "v": True}
             items.append(it)
@@ -3298,7 +3340,8 @@ def cmd_serve(args) -> int:
         all_folders = sorted({_subfolder(it["f"]) for it in items})
         manifest = {"names": all_names, "folders": all_folders, "liveMax": args.live_max,
                     "videoStale": state.get("video_stale", False),
-                    "items": [{"k": it["k"], "n": it["n"], "fc": it["fc"],
+                    "confident": state.get("confident", False),
+                    "items": [{"k": it["k"], "n": it["n"], "r": it["r"], "fc": it["fc"],
                                "h": it["h"], "s": it["s"], "sf": _subfolder(it["f"]),
                                "dt": it["dt"], "v": 1 if it["v"] else 0,
                                "d": round(it["d"], 1) if it["v"] else 0}
