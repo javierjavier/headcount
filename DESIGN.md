@@ -453,6 +453,13 @@ album is already labeled, which collapses the cost:
   gets ahead of the csv and resume is lossless. It's opt-in (a separate command),
   since at ~detector-inference-per-frame it's a mini-embed (~18 min for this
   album's 704 clips at 1 fps).
+- **Staleness**: clips are matched against name centroids, so a scan is only
+  valid for the names it ran with. `video_people.names` holds a hash of every
+  photo face's name (`names_fingerprint`), which changes on a rename, a new or
+  removed name, or a re-cluster. When it no longer matches, `video` discards the
+  manifest and re-scans everything instead of resuming, and `serve` flags the
+  video names as out of date. A per-clip rescan of only affected names isn't
+  possible: any name change moves the centroids the margin test compares.
 - **Noise control** is the `cluster`-style lever applied up front: `--min-size`
   drops tiny faces, and the threshold+margin keep ambiguous matches out. Video
   faces are weaker (blur, angle) so the defaults stay conservative.

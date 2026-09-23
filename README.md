@@ -77,20 +77,24 @@ python faces.py embed
 #    those known faces land in ONE clean cluster.
 python faces.py cluster
 
-# 3. review — montage each cluster into clusters/ + write a skeleton labels.csv
+# 3. review — montage each cluster into work/clusters/ + write a skeleton labels.csv
 python faces.py review
 
-# 4. label — name each cluster in labels.csv. See "Labeling" below the workflow.
-open work/clusters                             # look at the montages
-open -e work/labels.csv                        # edit in TextEdit, not Numbers
+# 4. label — opens a page in the browser that shows each montage and asks who it
+#    is. Type a name or skip; press Done and it builds the gallery (step 7).
+#    The gallery's thumbnails build in the background while you label, so on a
+#    first run most of that wait is over by the time you press Done.
+#    See "Labeling" below the workflow.
+python faces.py serve
 
 # 5. assign — who's in each photo -> image_people.csv (+ per-child counts).
+#    serve runs this for you whenever the names change, so you only need it for
+#    the options below.
 #    Noise recovery is ON by default: pulls noise/profile faces into their nearest
 #    named cluster, lifting recall (~84%->97% for a well-photographed kid) at ~97%
 #    purity. --no-recover for strict named-clusters-only. --folders [dir] also sorts
 #    copies into by_child/<name>/ (opt-in, default off; a photo with 3 named kids
 #    lands in all 3 folders).
-python faces.py assign
 python faces.py assign --folders               # also fan out into by_child/
 
 # 6. query — copy any slice into query/<expr>/ as the original files; --jpeg to
@@ -122,6 +126,8 @@ python faces.py query --with ada --split-size --recovered split --zip
 #    video_people.csv (clip -> names). Resumable like embed; needs ffmpeg. The
 #    photo pipeline is untouched — this only reads faces/clusters/labels. Slow-ish
 #    (a mini-embed: ~detector inference per sampled frame), so it's opt-in.
+#    If you change names afterwards, the gallery says the video names are out of
+#    date; running `video` again re-scans every clip with the new names.
 python faces.py video                          # -> video_people.csv
 python faces.py video --fps 2 --limit 20       # denser sampling; first 20 clips
 
@@ -133,7 +139,8 @@ python faces.py video --fps 2 --limit 20       # denser sampling; first 20 clips
 #    and shows progress, then loads the gallery. Later runs reuse the cache.
 #    Videos in album/ also appear in the grid (play inline in the lightbox);
 #    toggle them with the Media checkboxes (photos/live photos/videos), or hide
-#    all videos with --no-videos.
+#    all videos with --no-videos. "Edit names" in the sidebar goes back to the
+#    labeling page.
 python faces.py serve                          # -> http://127.0.0.1:8765
 python faces.py serve --thumb 1024             # sharper previews (see note)
 python faces.py serve --no-videos              # photos only
@@ -142,18 +149,30 @@ python faces.py serve --no-videos              # photos only
 ### Labeling (step 4)
 
 `cluster` sorts every face into groups it thinks are the same person. `review`
-then writes one montage per group into `work/clusters/`: a 5×5 grid of up to 25 face
-crops from that group. The filename tells you which group it is:
+then makes one montage per group: a 5×5 grid of up to 25 face crops from that
+group. The first time you run `python faces.py serve`, the browser shows these
+montages one at a time, biggest group first, and asks who each one is:
 
-```
-c00__cluster22__n209.jpg
- │       │        └─ 209 faces in this group
- │       └─ cluster id 22
- └─ rank 00 = biggest group (montages are sorted biggest first)
-```
+- **One child, or mostly one child** → type their name and press Enter.
+- **Same child as an earlier montage** → the same name again; pick it from the
+  suggestions. One child is often split across two or three groups.
+- **Mixed children, adults you don't need, blurry or turned-away faces** → Skip.
 
-`work/labels.csv` has one row per montage: the montage filename, then a comma. Look
-at each montage and type a name after the comma of its row:
+One group, often the first and biggest, collects blurry, turned-away and partly
+hidden faces. They look more like each other than like any one child. That's
+normal: skip it.
+
+Names are matched exactly, including capitalization, so use one short spelling
+per child (`ada`, not `Ada` in one place and `ada` in another). The page warns
+you when a name differs from an earlier one only in capitals. A name with a
+space has to be quoted on the command line (`--with "ada b"`), so single words
+are easier.
+
+You don't need to name every montage, only the children you care about. Names
+save as you go, so you can close the page and come back. Press **Done** to build
+the gallery. To change a name later, use **Edit names** in the gallery sidebar.
+
+The names are stored in `work/labels.csv`, one `montage,name` row per montage:
 
 ```
 montage,name
@@ -161,28 +180,12 @@ c00__cluster22__n209.jpg,
 c01__cluster20__n188.jpg,ada
 ```
 
-Don't rename the montages or edit the filenames in `labels.csv`: the cluster id
-in the filename is how the tool knows which faces a name belongs to.
-
-- **One child** → their name.
-- **Same child as another montage** → the same name again. One child is often
-  split across two groups.
-- **Mixed children, adults you don't need, blurry or turned-away faces** → leave
-  blank. Blank rows are ignored.
-
-One group, often the biggest (so often `c00`), collects blurry, turned-away and
-partly hidden faces. They look more like each other than like any one child.
-That's normal: leave it blank.
-
-Names are matched exactly, including capitalization, so use one short spelling
-per child (`ada`, not `Ada` in one row and `ada` in another). A name with a space
-has to be quoted on the command line (`--with "ada b"`), so single words are
-easier.
-
-On a Mac, double-clicking `labels.csv` opens it in Numbers, which tries to save
-it as a `.numbers` file. Use `open -e work/labels.csv` to edit it in TextEdit instead,
-and save with ⌘S. You don't need to name every montage; name the children you
-care about, save, and run `python faces.py assign`.
+The montage filename says which group it is: `c00` is the rank (biggest first),
+`cluster22` the cluster id, `n209` the number of faces. You can edit the file by
+hand instead of using the page (on a Mac, `open -e work/labels.csv` edits it in
+TextEdit; Numbers would convert it). Don't change the filenames: the cluster id
+in them is how the tool knows which faces a name belongs to. `serve` picks up
+the edits on its next start.
 
 ### Gallery (`serve`)
 
@@ -211,7 +214,8 @@ re-encoded). Use `--no-videos` to leave them out.
 If you've run `faces.py video` (see step 6b), `serve` also overlays each clip's
 detected names from `video_people.csv` — so videos become name-filterable and
 show names in the grid tooltip and lightbox caption, just like photos. Without
-that pass, videos simply show with no names.
+that pass, videos simply show with no names. If names have changed since `video`
+ran, the gallery shows a note above the grid until you run it again.
 
 Two notes:
 
@@ -312,7 +316,7 @@ majority vote** against that backup — robust to renumbering. It prints how man
 names it carried and flags any cluster labeled with <90% vote agreement so you
 can eyeball just those montages. (First run, with no backup, it falls back to the
 old by-id carry.) So after adding photos the labeling step is usually a quick
-confirm, not a redo — re-type a name only for a genuinely new child.
+confirm, not a redo: open **Edit names** in the gallery and name only the genuinely new children.
 
 The skip logic keys on the image's path **relative to `album/`** (e.g.
 `photos-3/IMG_4492.HEIC`), not its bare basename. This is why subfolders matter:
@@ -365,7 +369,7 @@ them once you've copied out what you need.
 | `faces.csv` / `faces.npy` | Every face's metadata + embedding (generated)      |
 | `faces.done`              | filenames already embedded, incl. zero-face images, for resume (generated) |
 | `clusters.csv`            | face → cluster id (generated)                      |
-| `labels.csv`              | cluster → name (you fill in during `review`)       |
+| `labels.csv`              | montage → name (filled in on the `serve` labeling page) |
 | `image_people.csv`        | filename → people present (generated)              |
 | `video_people.csv`        | video → people present, from `video` (generated)   |
 | `scene.csv`               | filename → indoor/outdoor (generated)              |
