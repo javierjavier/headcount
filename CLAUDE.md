@@ -17,7 +17,8 @@ top level.
 
 ## Layout
 
-- `faces.py` — the tool: `embed`/`cluster`/`review`/`assign`/`query`/`scene`.
+- `faces.py` — the tool: `embed`/`cluster`/`review`/`assign`/`query`/`scene`/
+  `video`/`serve` (`serve` also hosts the labeling page).
 - `enroll.py` — optional cold-start calibration anchor from `reference/`.
 - `common.py` — shared image loading (any Pillow-readable format, EXIF-aware),
   model setup, small utils.

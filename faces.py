@@ -21,7 +21,7 @@ Phases:
           (clusters/) and write a skeleton labels.csv. `serve` then shows each
           montage and asks for a name; that's the actual tagging step.
 
-  assign  From the filled-in labels.csv, compute who is in each photo ->
+  assign  From the names in labels.csv, compute who is in each photo ->
           image_people.csv, and optionally sort copies into by_child/.
 
   query   Set queries over image_people.csv, e.g. `--with Ada,Ben` (both
@@ -30,6 +30,13 @@ Phases:
 
   scene   Tag each photo indoor/outdoor from foliage+sky colour -> scene.csv,
           and print the hour cross-tab so it can be checked against the schedule.
+
+  video   Name the faces inside album videos against the labeled photo clusters
+          -> video_people.csv. Re-scans everything when the names change.
+
+  serve   Localhost web app. With no names yet, a labeling page (one montage at
+          a time; writes labels.csv); then the gallery: filters and zip export.
+          Re-runs assign whenever labels.csv is newer than image_people.csv.
 
 Artifacts:
   faces.csv   one row per face: face_id, filename, x1, y1, x2, y2, det_score
