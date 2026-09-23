@@ -35,7 +35,7 @@ Ada." Both paths share the face-embedding backbone (`faces.npy`).
 ```
 album/ ──embed──▶ faces.npy + faces.csv ──cluster──▶ clusters.csv
                                                           │
-                                              review (montages) ──▶ labels.csv  ◀── you edit
+                                              review (montages) ──▶ labels.csv  ◀── you name them in serve
                                                           │
                                    assign ──▶ image_people.csv ──▶ by_child/<name>/
                                                           │
@@ -99,11 +99,19 @@ Load `faces.npy` (already normalized → cosine = dot product), cluster, write
 
 ### 3. `review` — human-in-the-loop (reuses montage tooling)
 
-For each cluster, emit a contact sheet of representative crops (medoid + a few
-samples) into `clusters/<cluster_id>/`, sorted by cluster size (most-photographed
-kids first). Write a skeleton `labels.csv` (`cluster_id, name`) for you to fill
-in. Minimal — folders of crops + a CSV you edit; no GUI required. Could later
-become a small local HTML page.
+For each cluster, emit one contact-sheet montage of up to 25 crops (an even
+sample across face sizes, so a contaminant isn't hidden) into `work/clusters/`,
+named `c{rank}__cluster{id}__n{size}.jpg` and ranked by cluster size
+(most-photographed kids first). Write a skeleton `labels.csv` with one
+`montage,name` row per montage; the cluster id is read back out of the filename,
+so the file a person sees has only the two columns they need.
+
+The names are typed on `serve`'s labeling page, which shows one montage at a
+time and writes `labels.csv` as you go (see *Browsing* below). Editing the CSV by
+hand still works, but it was the step a first-time user was most likely to get
+wrong: Numbers on a Mac converts the file, and nothing catches `Ada` vs `ada`
+across rows. The page suggests names already used and warns on a capitalization
+mismatch.
 
 Re-running after a new import is the common case, and HDBSCAN does **not** keep
 cluster ids stable across runs (the same integer can denote a different child once
@@ -229,6 +237,20 @@ exhaustive. False positives are correspondingly rarer (both must be mislabeled).
 an alternative to fanning copies into Finder folders with `query`. It binds
 `127.0.0.1` only — the same local-only privacy stance as everything else.
 
+It is also where labeling happens. When `labels.csv` has no names, `/` shows the
+labeling page instead of the gallery (and `/label` shows it any time, via "Edit
+names"). Every step saves `labels.csv`; unchanged content isn't rewritten, so
+paging through doesn't touch the file's mtime. `serve` re-runs `assign` itself
+whenever `labels.csv` is newer than `image_people.csv`, which covers both the
+labeling page and hand edits with one rule, and means `assign` is only a
+separate step for `--folders` or non-default recovery settings.
+
+Thumbnails, capture dates and video lengths don't depend on names, so while the
+labeling page is up a background thread builds them for every photo in
+`faces.csv` (the same set `assign` writes to `image_people.csv`, so the cache
+keys match). Done waits for that thread and then finds the caches warm; on a
+first run most of the thumbnail wait overlaps with labeling.
+
 **Thumbnail size (`--thumb`, default 768) is deliberate — don't drop it back to
 320.** Previews are pre-rendered into `work/serve_cache/` once (re-decoding each HEIC
 is the slow part; everything else is instant). The blur trap: the grid lays out
@@ -312,9 +334,9 @@ shared state.
 | `faces.csv` | embed | `face_id, filename, bbox, det_score` (parallel to npy) |
 | `faces.done` | embed | one processed filename per line, incl. zero-face images, so resume skips them (faces.csv only lists images that yielded a face) |
 | `clusters.csv` | cluster | `face_id → cluster_id` |
-| `labels.csv` | review | `cluster_id → name` (human-edited) |
+| `labels.csv` | review | `montage → name`; names typed on `serve`'s labeling page (or by hand) |
 | `image_people.csv` | assign | `filename → set of names` |
-| `video_people.csv` | video | `video → set of names` (+ `n_named`, peak frame per name); `video_people.done` is its resume manifest |
+| `video_people.csv` | video | `video → set of names` (+ `n_named`, peak frame per name); `video_people.done` is its resume manifest; `video_people.names` is the names fingerprint it scanned with |
 | `by_child/<name>/`, `query/<expr>/` | assign/query | output copies |
 
 All of these contain biometric data and stay gitignored (see below).
