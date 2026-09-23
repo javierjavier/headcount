@@ -18,8 +18,8 @@ Phases:
           person's faces fall into one clean cluster.
 
   review  Crop a sample of each cluster's faces into a contact-sheet montage
-          (clusters/) and write a skeleton labels.csv. You open the montages and
-          type a name per cluster; that's the actual tagging step.
+          (clusters/) and write a skeleton labels.csv. `serve` then shows each
+          montage and asks for a name; that's the actual tagging step.
 
   assign  From the filled-in labels.csv, compute who is in each photo ->
           image_people.csv, and optionally sort copies into by_child/.
@@ -813,8 +813,7 @@ def cmd_review(args) -> int:
         if lost:
             print(f"  ! {len(lost)} prior name(s) were for cluster id(s) not in this run "
                   f"({', '.join(map(str, lost))}); they remain only in the backup.")
-    print("Open the montages (biggest clusters are c00, c01, ...), then type a name in\n"
-          f"the 'name' column of {labels_path} for each. Same kid in two clusters? Same name.")
+    print("Next: `python faces.py serve` opens a page in the browser to name each montage.")
     return 0
 
 
@@ -1065,6 +1064,67 @@ def _read_labels(path: Path) -> dict[int, str]:
     return out
 
 
+_MONTAGE_SIZE = re.compile(r"__n(\d+)\.")
+
+
+def read_label_rows(path: Path) -> list[dict]:
+    """labels.csv as [{"montage", "name", "size"}] in file order (biggest cluster
+    first, as `review` wrote it), for serve's labeling page. `size` is the face
+    count from the montage filename, or None if the name doesn't carry one."""
+    out = []
+    for r in read_face_rows(path):
+        montage = (r.get("montage") or "").strip()
+        if not montage:
+            continue
+        m = _MONTAGE_SIZE.search(montage)
+        out.append({"montage": montage, "name": (r.get("name") or "").strip(),
+                    "size": int(m.group(1)) if m else None})
+    return out
+
+
+def apply_label_edits(rows: list[dict], edits: dict[str, str]) -> list[dict]:
+    """Return *rows* with names replaced from *edits* ({montage: name}).
+
+    Raises ValueError for a montage that isn't in labels.csv (the page is out of
+    date, e.g. `review` ran again meanwhile) or a name `assign` can't store:
+    image_people.csv joins names with ";", so a name can't contain one.
+    """
+    known = {r["montage"] for r in rows}
+    unknown = sorted(set(edits) - known)
+    if unknown:
+        raise ValueError(f"{len(unknown)} montage(s) aren't in labels.csv any more "
+                         f"({', '.join(unknown[:3])}). Reload the page.")
+    out = []
+    for r in rows:
+        name = " ".join(str(edits.get(r["montage"], r["name"])).split())
+        if ";" in name:
+            raise ValueError(f"Names can't contain ';' ({name!r}).")
+        out.append({**r, "name": name})
+    return out
+
+
+def write_label_rows(path: Path, rows: list[dict]) -> None:
+    """Write labels.csv as `montage,name`, replacing the file in one step so
+    `assign` never reads a half-written file."""
+    import os
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", newline="") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(["montage", "name"])
+        for r in rows:
+            w.writerow([r["montage"], r["name"]])
+    os.replace(tmp, path)
+
+
+def assign_is_stale(labels: Path, image_people: Path) -> bool:
+    """True when image_people.csv is missing or older than labels.csv, i.e. the
+    names changed since `assign` last ran."""
+    if not image_people.exists():
+        return True
+    return labels.exists() and labels.stat().st_mtime > image_people.stat().st_mtime
+
+
 def _materialize(filenames, name: str, album: Path, base: Path) -> int:
     """Copy each file into base/name/."""
     from common import _unique_path
@@ -1160,7 +1220,7 @@ def cmd_assign(args) -> int:
         print(e, file=sys.stderr)
         return 1
     if not labels:
-        print(f"No names filled into {args.labels} yet — run `review`, then type names.",
+        print(f"No names in {args.labels} yet — run `review`, then name the montages with `serve`.",
               file=sys.stderr)
         return 1
 
@@ -1298,7 +1358,7 @@ def cmd_video(args) -> int:
         print(e, file=sys.stderr)
         return 1
     if not labels:
-        print(f"No names in {args.labels} — run `review`/`assign` first, then label.",
+        print(f"No names in {args.labels} — run `review`, then name the montages with `serve`.",
               file=sys.stderr)
         return 1
     names, cents = build_name_centroids(rows, clusters, labels, mat)
@@ -1743,6 +1803,180 @@ poll();
 </body>
 </html>"""
 
+# Shown by `serve` when labels.csv has no names yet, and at /label from the
+# gallery. One montage at a time: type a name or skip. Every step saves
+# labels.csv; Done also re-runs assign and builds the gallery.
+SERVE_LABEL_PAGE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>headcount: name the faces</title>
+<link rel="icon" href="/favicon.svg">
+<style>
+  :root { --bg:#16181d; --panel:#1f232b; --ink:#e7e9ee; --muted:#9aa3b2; --accent:#5b9dff; --line:#2c313b; --warn:#ffc46b; --err:#ff8a8a; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
+  .page { max-width:1080px; margin:0 auto; padding:20px 16px 32px; }
+  header { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:18px; }
+  h1 { font-size:20px; margin:0; }
+  #progress { color:var(--muted); font-variant-numeric:tabular-nums; }
+  header .spacer { flex:1; }
+  header a { color:var(--accent); text-decoration:none; }
+  header a:hover { text-decoration:underline; }
+  button { font:inherit; background:var(--accent); color:#fff; border:0; padding:9px 18px; border-radius:7px; font-weight:600; cursor:pointer; }
+  button.ghost { background:none; color:var(--ink); border:1px solid var(--line); font-weight:500; }
+  button.ghost:hover:not(:disabled) { border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:default; }
+  .main { display:grid; grid-template-columns:minmax(0, 560px) minmax(0, 1fr); gap:28px; align-items:start; }
+  .shot { background:var(--panel); border-radius:10px; overflow:hidden; aspect-ratio:1; }
+  .shot img { width:100%; height:100%; object-fit:contain; display:block; }
+  #which { color:var(--muted); margin:0 0 12px; font-variant-numeric:tabular-nums; }
+  label.q { display:block; font-weight:600; margin-bottom:6px; }
+  #name { width:100%; font:inherit; font-size:17px; padding:10px 12px; background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:8px; }
+  #name:focus { outline:none; border-color:var(--accent); }
+  #hint { min-height:22px; margin:6px 0 0; font-size:13px; color:var(--warn); }
+  .nav { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .help { margin-top:22px; color:var(--muted); font-size:14px; }
+  .help ul { margin:6px 0 0; padding-left:18px; }
+  .help li { margin-bottom:4px; }
+  .help b { color:var(--ink); font-weight:600; }
+  #msg { margin-top:12px; color:var(--err); min-height:22px; white-space:pre-wrap; }
+  .strip { display:grid; grid-template-columns:repeat(auto-fill, minmax(86px, 1fr)); gap:10px; margin-top:28px; }
+  .strip button { background:none; border:2px solid transparent; border-radius:8px; padding:0; color:var(--muted); font-weight:400; font-size:12px; text-align:center; overflow:hidden; }
+  .strip button img { width:100%; aspect-ratio:1; object-fit:cover; display:block; border-radius:6px; opacity:.55; }
+  .strip button.named img { opacity:1; }
+  .strip button.named span { color:var(--ink); }
+  .strip button.cur { border-color:var(--accent); }
+  .strip span { display:block; padding:3px 2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  @media (max-width:760px) { .main { grid-template-columns:minmax(0, 1fr); gap:18px; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>Name the faces</h1>
+    <span id="progress"></span>
+    <span class="spacer"></span>
+    <a id="back" href="/" hidden>Back to the gallery</a>
+    <button id="done" type="button">Done: build the gallery</button>
+  </header>
+  <div class="main">
+    <div class="shot"><img id="img" alt="Faces the tool grouped as one person"></div>
+    <div>
+      <p id="which"></p>
+      <label class="q" for="name">Who is this?</label>
+      <input id="name" list="known" autocomplete="off" spellcheck="false" placeholder="Name, or leave blank to skip">
+      <datalist id="known"></datalist>
+      <p id="hint"></p>
+      <div class="nav">
+        <button id="prev" class="ghost" type="button">Back</button>
+        <button id="skip" class="ghost" type="button">Skip</button>
+        <button id="next" type="button">Next</button>
+      </div>
+      <div id="msg"></div>
+      <div class="help">
+        Each picture shows up to 25 faces the tool thinks belong to one person.
+        <ul>
+          <li><b>One kid, or mostly one kid:</b> type their name and press Enter.</li>
+          <li><b>A kid you already named:</b> pick the same name from the list. A kid often shows up in several pictures.</li>
+          <li><b>Mixed kids, adults, blurry or turned-away faces:</b> Skip.</li>
+        </ul>
+        One picture, often the first, is all blurry and half-hidden faces. That's normal. Skip it.
+        Your names save as you go. When you've been through them all, press Done.
+      </div>
+    </div>
+  </div>
+  <div class="strip" id="strip"></div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let rows = [], i = 0;
+const names = {};   // montage -> name typed on this page
+
+function known(except) {
+  const s = new Set();
+  rows.forEach(r => { const n = names[r.montage]; if (n && r.montage !== except) s.add(n); });
+  return [...s].sort((a, b) => a.localeCompare(b, undefined, {sensitivity: "base"}));
+}
+function namedCount() { return rows.filter(r => names[r.montage]).length; }
+
+function hint() {
+  const v = $("name").value.trim(), others = known(rows[i].montage);
+  const near = v && !others.includes(v) && others.find(n => n.toLowerCase() === v.toLowerCase());
+  $("hint").textContent = near ? "Another picture uses \\u201c" + near + "\\u201d. Names must match exactly to count as the same kid." : "";
+}
+
+function render() {
+  const r = rows[i];
+  $("img").src = "/montage/" + encodeURIComponent(r.montage);
+  $("which").textContent = "Picture " + (i + 1) + " of " + rows.length + (r.size ? " \\u00b7 " + r.size + " faces in this group" : "");
+  $("progress").textContent = namedCount() + " of " + rows.length + " named";
+  $("name").value = names[r.montage] || "";
+  $("known").innerHTML = "";
+  known(r.montage).forEach(n => { const o = document.createElement("option"); o.value = n; $("known").appendChild(o); });
+  $("prev").disabled = i === 0;
+  $("next").textContent = i === rows.length - 1 ? "Done: build the gallery" : "Next";
+  $("strip").querySelectorAll("button").forEach((b, k) => {
+    const n = names[rows[k].montage];
+    b.classList.toggle("cur", k === i);
+    b.classList.toggle("named", !!n);
+    b.querySelector("span").textContent = n || "\\u2014";
+  });
+  hint();
+}
+
+async function save(finish) {
+  $("msg").textContent = "";
+  try {
+    const res = await fetch("/labels", {method: "POST", headers: {"Content-Type": "application/json"},
+                                        body: JSON.stringify({names, finish})});
+    if (!res.ok) { $("msg").textContent = (await res.json()).error || "Saving failed."; return false; }
+    return true;
+  } catch (e) { $("msg").textContent = "Couldn't reach the server. Is `faces.py serve` still running?"; return false; }
+}
+
+function keep() { names[rows[i].montage] = $("name").value.trim().split(/ +/).join(" "); }
+function go(k) {
+  if (k >= rows.length) { finish(); return; }   // past the last picture: same as Done
+  keep(); save(false);
+  i = Math.max(0, k); render(); $("name").focus();
+}
+async function finish() {
+  keep(); render();
+  if (!namedCount()) { $("msg").textContent = "Type a name for at least one picture first."; return; }
+  $("done").disabled = $("next").disabled = true;
+  if (await save(true)) location.href = "/";
+  else $("done").disabled = $("next").disabled = false;
+}
+
+$("prev").onclick = () => go(i - 1);
+$("next").onclick = () => go(i + 1);
+$("skip").onclick = () => { $("name").value = ""; go(i + 1); };
+$("name").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); go(i + 1); } });
+$("name").addEventListener("input", hint);
+$("done").onclick = finish;
+
+(async () => {
+  if (location.pathname === "/label") $("back").hidden = false;
+  rows = (await (await fetch("/labels.json", {cache: "no-store"})).json()).rows;
+  if (!rows.length) { $("msg").textContent = "labels.csv lists no pictures. Run `python faces.py review` first."; return; }
+  rows.forEach(r => { names[r.montage] = r.name; });
+  rows.forEach((r, k) => {
+    const b = document.createElement("button"); b.type = "button"; b.title = r.montage;
+    const im = document.createElement("img"); im.loading = "lazy"; im.src = "/montage/" + encodeURIComponent(r.montage); im.alt = "";
+    b.append(im, document.createElement("span"));
+    b.onclick = () => go(k);
+    $("strip").appendChild(b);
+  });
+  const first = rows.findIndex(r => !r.name);
+  i = first >= 0 && namedCount() ? first : 0;
+  render(); $("name").focus();
+})();
+</script>
+</body>
+</html>"""
+
 SERVE_PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -1805,6 +2039,8 @@ SERVE_PAGE = """<!doctype html>
   .reset { width:100%; margin-bottom:6px; background:none; color:var(--muted); border:1px solid var(--line); padding:8px 12px; font-weight:500; }
   .reset:hover:not(:disabled) { color:var(--ink); border-color:var(--accent); }
   .reset:disabled { opacity:.45; cursor:default; }
+  .relabel { display:block; margin-bottom:10px; color:var(--accent); text-decoration:none; font-weight:600; }
+  .relabel:hover { text-decoration:underline; }
   .ctl { display:flex; align-items:center; gap:8px; color:var(--muted); }
   .ctl select { width:auto; }
   .grid { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-start; }
@@ -1854,6 +2090,7 @@ SERVE_PAGE = """<!doctype html>
 <body>
 <div class="wrap">
   <aside>
+    <a class="relabel" href="/label" title="Change which name goes with each group of faces">Edit names</a>
     <button id="reset" class="reset" title="Clear every filter and view setting back to default" disabled>Reset all filters</button>
     <h2>Names</h2>
     <input type="search" id="nsearch" placeholder="filter names…" autocomplete="off">
@@ -2769,106 +3006,118 @@ def cmd_serve(args) -> int:
     import webbrowser
     import zipfile
 
-    ip = Path(args.image_people)
-    if not ip.exists():
-        print(f"{ip} not found — run `assign` first.", file=sys.stderr)
-        return 1
-
-    people = {
-        r["filename"]: sorted(filter(None, (r.get("names") or "").split(";")))
-        for r in read_face_rows(ip)
-    }
-
-    # Per-photo face count (how crowded the shot is): the number of faces the
-    # detector found, i.e. every faces.csv row for the photo. Powers the gallery's
-    # min/max-faces slider. NOTE: this deliberately does NOT reuse `cluster`'s
-    # size/det pre-filter — that threshold drops faces whose *embeddings* are too
-    # noisy to identify, which is unrelated to a headcount. A distant group shot
-    # has many small-but-clearly-detected faces and the slider should count them
-    # all; the detector already gates on confidence at embed time (det_thresh), so
-    # the raw row count is the right "how many faces are in this photo" answer.
-    # A photo not in faces.csv (or when faces.csv is missing) has a genuinely
-    # unknown count -> null -> always passes, like unknown-hour items. (Videos get
-    # their count from the `video` pass — see video items below.)
-    face_counts: dict[str, int] = {}
-    fcsv = Path(args.faces)
-    if fcsv.exists():
-        from collections import Counter
-
-        fc: Counter[str] = Counter()
-        for r in read_face_rows(fcsv):
-            fc[r["filename"]] += 1
-        face_counts = dict(fc)
-
-    # Optional scene/hour overlay — present iff a `scene` pass has been run.
-    hours, scenes = {}, {}
-    sp = Path(args.scene)
-    if sp.exists():
-        for r in read_face_rows(sp):
-            h = r.get("hour")
-            hours[r["filename"]] = int(h) if h and h.isdigit() else None
-            scenes[r["filename"]] = r.get("scene") or ""
-
-    # scene.csv only covers photos, so videos would have no indoor/outdoor tag and
-    # vanish whenever a scene is selected. The album's scene is time-derived (see
-    # DESIGN.md), so reconstruct an hour -> scene map from the photos that DO have a
-    # scene and reuse it to tag videos by their capture hour — no new config, same
-    # rule. (Falls back to "unknown" for hours no photo covers; those pass the
-    # filter, just as unknown-hour items pass the time filter.)
-    hour_scene: dict[int, str] = {}
-    if scenes:
-        from collections import Counter, defaultdict
-
-        votes: dict[int, Counter] = defaultdict(Counter)
-        for fn, sc in scenes.items():
-            h = hours.get(fn)
-            if sc and h is not None:
-                votes[h][sc] += 1
-        hour_scene = {h: c.most_common(1)[0][0] for h, c in votes.items()}
-
-    # Optional video-name overlay — present iff a `video` pass has been run, so
-    # clips get the same name filter/caption treatment as photos.
-    vpeople = {}
-    vp = Path(args.video_people)
-    if vp.exists():
-        vpeople = {r["filename"]: sorted(filter(None, (r.get("names") or "").split(";")))
-                   for r in read_face_rows(vp)}
-
     album = Path(args.album)
-    # `k` is a filesystem-safe key used for thumb/full/video URLs and as the cache
-    # filename; `f` is the real album-relative path used to read original bytes.
-    # See assign_thumb_keys for why a bare stem isn't always safe with subfolders.
-    visible = [(fn, names) for fn, names in sorted(people.items())
-               if (album / fn).exists()]
-    # Videos are an additive view layer: the face pipeline ignores them, so they
-    # carry no names and are discovered straight from album/ (not image_people).
-    video_fns = [] if args.no_videos else [rel_key(p, album) for p in list_videos(album)]
-    # Key photos and videos together so a video and photo sharing a stem
-    # (IMG_1.MP4 vs IMG_1.HEIC) still get distinct, collision-free cache keys.
-    keys = assign_thumb_keys([fn for fn, _ in visible] + video_fns)
-    items, by_key = [], {}
-    for fn, names in visible:
-        it = {"k": keys[fn], "f": fn, "n": names,
-              "fc": face_counts.get(fn),  # None when not in faces.csv -> unknown count
-              "h": hours.get(fn), "s": scenes.get(fn, ""), "v": False}
-        items.append(it)
-        by_key[keys[fn]] = it
-    for fn in video_fns:
-        # Videos aren't in the face pipeline, so their "face count" is the number
-        # of distinct *named* people from the `video` pass (the only per-clip head
-        # count available). This undercounts unnamed kids vs a photo's all-faces
-        # count, but it's far better than leaving videos uncounted — that made a
-        # clip with several kids show up under a "1–2 faces" filter. A video the
-        # `video` pass never scanned has no entry -> null -> always passes.
-        names_v = vpeople.get(fn)
-        it = {"k": keys[fn], "f": fn, "n": names_v or [],
-              "fc": len(names_v) if names_v is not None else None,
-              "h": None, "s": "", "v": True}
-        items.append(it)
-        by_key[keys[fn]] = it
-    if not items:
-        print(f"No album files found for the {len(people)} indexed photos under {album}/.", file=sys.stderr)
+    labels_path, ip = Path(args.labels), Path(args.image_people)
+    if not labels_path.exists():
+        print(f"{labels_path} not found — run `review` first.", file=sys.stderr)
         return 1
+    try:
+        need_names = not _read_labels(labels_path)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+    montage_dir = Path(args.montages)
+    items: list[dict] = []
+    by_key: dict[str, dict] = {}
+
+    def load_gallery() -> dict[int, str]:
+        """Fill items/by_key from image_people.csv and the optional overlays.
+        Returns the hour -> scene map used to tag videos."""
+        people = {
+            r["filename"]: sorted(filter(None, (r.get("names") or "").split(";")))
+            for r in read_face_rows(ip)
+        }
+
+        # Per-photo face count (how crowded the shot is): the number of faces the
+        # detector found, i.e. every faces.csv row for the photo. Powers the gallery's
+        # min/max-faces slider. NOTE: this deliberately does NOT reuse `cluster`'s
+        # size/det pre-filter — that threshold drops faces whose *embeddings* are too
+        # noisy to identify, which is unrelated to a headcount. A distant group shot
+        # has many small-but-clearly-detected faces and the slider should count them
+        # all; the detector already gates on confidence at embed time (det_thresh), so
+        # the raw row count is the right "how many faces are in this photo" answer.
+        # A photo not in faces.csv (or when faces.csv is missing) has a genuinely
+        # unknown count -> null -> always passes, like unknown-hour items. (Videos get
+        # their count from the `video` pass — see video items below.)
+        face_counts: dict[str, int] = {}
+        fcsv = Path(args.faces)
+        if fcsv.exists():
+            from collections import Counter
+
+            fc: Counter[str] = Counter()
+            for r in read_face_rows(fcsv):
+                fc[r["filename"]] += 1
+            face_counts = dict(fc)
+
+        # Optional scene/hour overlay — present iff a `scene` pass has been run.
+        hours, scenes = {}, {}
+        sp = Path(args.scene)
+        if sp.exists():
+            for r in read_face_rows(sp):
+                h = r.get("hour")
+                hours[r["filename"]] = int(h) if h and h.isdigit() else None
+                scenes[r["filename"]] = r.get("scene") or ""
+
+        # scene.csv only covers photos, so videos would have no indoor/outdoor tag and
+        # vanish whenever a scene is selected. The album's scene is time-derived (see
+        # DESIGN.md), so reconstruct an hour -> scene map from the photos that DO have a
+        # scene and reuse it to tag videos by their capture hour — no new config, same
+        # rule. (Falls back to "unknown" for hours no photo covers; those pass the
+        # filter, just as unknown-hour items pass the time filter.)
+        hour_scene: dict[int, str] = {}
+        if scenes:
+            from collections import Counter, defaultdict
+
+            votes: dict[int, Counter] = defaultdict(Counter)
+            for fn, sc in scenes.items():
+                h = hours.get(fn)
+                if sc and h is not None:
+                    votes[h][sc] += 1
+            hour_scene = {h: c.most_common(1)[0][0] for h, c in votes.items()}
+
+        # Optional video-name overlay — present iff a `video` pass has been run, so
+        # clips get the same name filter/caption treatment as photos.
+        vpeople = {}
+        vp = Path(args.video_people)
+        if vp.exists():
+            vpeople = {r["filename"]: sorted(filter(None, (r.get("names") or "").split(";")))
+                       for r in read_face_rows(vp)}
+
+        # `k` is a filesystem-safe key used for thumb/full/video URLs and as the cache
+        # filename; `f` is the real album-relative path used to read original bytes.
+        # See assign_thumb_keys for why a bare stem isn't always safe with subfolders.
+        visible = [(fn, names) for fn, names in sorted(people.items())
+                   if (album / fn).exists()]
+        # Videos are an additive view layer: the face pipeline ignores them, so they
+        # carry no names and are discovered straight from album/ (not image_people).
+        video_fns = [] if args.no_videos else [rel_key(p, album) for p in list_videos(album)]
+        # Key photos and videos together so a video and photo sharing a stem
+        # (IMG_1.MP4 vs IMG_1.HEIC) still get distinct, collision-free cache keys.
+        keys = assign_thumb_keys([fn for fn, _ in visible] + video_fns)
+        items.clear()
+        by_key.clear()
+        for fn, names in visible:
+            it = {"k": keys[fn], "f": fn, "n": names,
+                  "fc": face_counts.get(fn),  # None when not in faces.csv -> unknown count
+                  "h": hours.get(fn), "s": scenes.get(fn, ""), "v": False}
+            items.append(it)
+            by_key[keys[fn]] = it
+        for fn in video_fns:
+            # Videos aren't in the face pipeline, so their "face count" is the number
+            # of distinct *named* people from the `video` pass (the only per-clip head
+            # count available). This undercounts unnamed kids vs a photo's all-faces
+            # count, but it's far better than leaving videos uncounted — that made a
+            # clip with several kids show up under a "1–2 faces" filter. A video the
+            # `video` pass never scanned has no entry -> null -> always passes.
+            names_v = vpeople.get(fn)
+            it = {"k": keys[fn], "f": fn, "n": names_v or [],
+                  "fc": len(names_v) if names_v is not None else None,
+                  "h": None, "s": "", "v": True}
+            items.append(it)
+            by_key[keys[fn]] = it
+        if not items:
+            raise RuntimeError(f"No album files found for the {len(people)} indexed photos under {album}/.")
+        return hour_scene
 
     cache = Path(args.cache)
     cache.mkdir(parents=True, exist_ok=True)
@@ -2880,9 +3129,23 @@ def cmd_serve(args) -> int:
     # The caches below are slow on a first run (a HEIC decode per photo), so they
     # build in a background thread while the server is already up: until
     # state["page"] is set, / shows SERVE_PREPARING_PAGE, which polls /status.
-    state: dict = {"step": "Starting", "done": 0, "total": 0, "page": None, "error": None}
+    # "labeling" is true while / shows the labeling page instead (no names yet);
+    # "building" is true while prepare() runs, so a second Done can't start another.
+    state: dict = {"step": "Starting", "done": 0, "total": 0, "page": None, "error": None,
+                   "labeling": need_names, "building": False}
 
     def prepare():
+        # Names changed since the last `assign` (labeling page, or labels.csv edited
+        # by hand): re-run it so the gallery shows them. Same defaults as the command.
+        if assign_is_stale(labels_path, ip):
+            state.update(step="Matching faces to names", done=0, total=0)
+            print("labels.csv changed since the last assign; running assign ...")
+            aargs = build_parser().parse_args([
+                "assign", "--album", args.album, "--faces", args.faces,
+                "--clusters", args.clusters, "--labels", args.labels, "--out", args.image_people])
+            if cmd_assign(aargs) != 0:
+                raise RuntimeError("assign failed")
+        hour_scene = load_gallery()
         state["step"] = "Making thumbnails"
         _build_thumbs(items, album, cache, args.thumb, args.prefetch,
                       progress=lambda d, t: state.update(done=d, total=t))
@@ -2955,8 +3218,15 @@ def cmd_serve(args) -> int:
         try:
             prepare()
         except Exception as e:  # noqa: BLE001 — surface it in the browser, not just the terminal
-            state["error"] = f"Preparing the gallery failed: {e!r}\nSee the terminal for details."
+            state["error"] = f"Preparing the gallery failed: {e}\nSee the terminal for details."
             raise
+        finally:
+            state["building"] = False
+
+    def start_build():
+        state.update(page=None, error=None, building=True, labeling=False,
+                     step="Starting", done=0, total=0)
+        threading.Thread(target=prepare_or_report, daemon=True).start()
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet: no per-request console spam
@@ -3019,10 +3289,25 @@ def cmd_serve(args) -> int:
                       "done": state["done"], "total": state["total"], "error": state["error"]}
                 self._send(200, json.dumps(st).encode(), "application/json",
                            {"Cache-Control": "no-store"})
-            elif path == "/":
-                body = state["page"] or SERVE_PREPARING_PAGE
+            elif path == "/" or path == "/label":
+                if path == "/label" or state["labeling"]:
+                    body = SERVE_LABEL_PAGE
+                else:
+                    body = state["page"] or SERVE_PREPARING_PAGE
                 self._send(200, body.encode(), "text/html; charset=utf-8",
                            {"Cache-Control": "no-store"})
+            elif path == "/labels.json":
+                self._send(200, json.dumps({"rows": read_label_rows(labels_path)}).encode(),
+                           "application/json", {"Cache-Control": "no-store"})
+            elif path.startswith("/montage/"):
+                name = path[len("/montage/"):]
+                # Only files labels.csv lists, so the URL can't reach anything else.
+                ok = name in {r["montage"] for r in read_label_rows(labels_path)}
+                f = montage_dir / name
+                if ok and f.is_file():
+                    self._send(200, f.read_bytes(), "image/jpeg", {"Cache-Control": "no-store"})
+                else:
+                    self._send(404, b"not found", "text/plain")
             elif path == "/favicon.svg":
                 self._send(200, FAVICON_SVG.encode(), "image/svg+xml",
                            {"Cache-Control": "max-age=86400"})
@@ -3070,6 +3355,9 @@ def cmd_serve(args) -> int:
 
         def do_POST(self):
             from urllib.parse import urlparse
+            if urlparse(self.path).path == "/labels":
+                self._save_labels()
+                return
             if urlparse(self.path).path != "/export":
                 self._send(404, b"not found", "text/plain")
                 return
@@ -3118,13 +3406,41 @@ def cmd_serve(args) -> int:
                 tmp.close()
                 Path(tmp.name).unlink(missing_ok=True)
 
+        def _save_labels(self):
+            """Save the labeling page's names to labels.csv. With "finish", also
+            rebuild the gallery (prepare() re-runs assign because labels.csv is
+            now newer than image_people.csv)."""
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                req = json.loads(self.rfile.read(length) or b"{}")
+                edits = {str(k): str(v) for k, v in (req.get("names") or {}).items()}
+                with labels_lock:
+                    rows = apply_label_edits(read_label_rows(labels_path), edits)
+                    finish = bool(req.get("finish"))
+                    if finish and not any(r["name"] for r in rows):
+                        raise ValueError("Type a name for at least one montage first.")
+                    if finish and state["building"]:
+                        raise ValueError("The gallery is still being prepared. Try again in a moment.")
+                    write_label_rows(labels_path, rows)
+                    if finish:
+                        start_build()
+            except (ValueError, json.JSONDecodeError) as e:
+                self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+                return
+            self._send(200, b'{"ok": true}', "application/json")
+
+    labels_lock = threading.Lock()
+
     class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         daemon_threads = True
 
     httpd = Server((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
     print(f"\n  serving at {url}  (Ctrl-C to stop)\n")
-    threading.Thread(target=prepare_or_report, daemon=True).start()
+    if need_names:
+        print(f"  no names in {labels_path} yet: name the faces in the browser, then press Done.\n")
+    else:
+        start_build()
     if not args.no_open:
         webbrowser.open(url)
     try:
@@ -3136,7 +3452,7 @@ def cmd_serve(args) -> int:
     return 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -3303,7 +3619,11 @@ def main() -> int:
 
     p_srv = sub.add_parser("serve", help="local web browser: name/time filters + zip export (localhost only)")
     p_srv.add_argument("--album", default="album", help="album folder (default: album/)")
-    p_srv.add_argument("--image-people", default=f"{WORK}/image_people.csv", help="index from `assign`")
+    p_srv.add_argument("--image-people", default=f"{WORK}/image_people.csv",
+                       help="index from `assign` (serve re-runs assign when labels.csv is newer)")
+    p_srv.add_argument("--labels", default=f"{WORK}/labels.csv", help="names per montage (default: work/labels.csv)")
+    p_srv.add_argument("--clusters", default=f"{WORK}/clusters.csv", help="cluster assignment (default: work/clusters.csv)")
+    p_srv.add_argument("--montages", default=f"{WORK}/clusters", help="montage folder from `review` (default: work/clusters/)")
     p_srv.add_argument("--faces", default=f"{WORK}/faces.csv",
                        help="face index from `embed` — powers the face-count filter (optional)")
     p_srv.add_argument("--scene", default=f"{WORK}/scene.csv", help="scene/hour index from `scene` (optional)")
@@ -3321,8 +3641,11 @@ def main() -> int:
                        help="videos this many seconds or shorter count as 'live photos' "
                             "in the Media filter (default: 3.5)")
     p_srv.set_defaults(func=cmd_serve)
+    return ap
 
-    args = ap.parse_args()
+
+def main() -> int:
+    args = build_parser().parse_args()
     for moved in ensure_work_dir():
         print(f"moved {moved}")
 

@@ -421,6 +421,54 @@ def test_read_labels_bad_montage_on_blank_row_is_ignored(tmp_path):
     assert faces._read_labels(lp) == {5: "Ada"}
 
 
+# --- serve's labeling page: read / edit / write labels.csv -----------------
+
+def test_label_rows_round_trip_with_edits(tmp_path):
+    lp = tmp_path / "labels.csv"
+    _write_labels(lp, ["montage", "name"],
+                  [["c00__cluster22__n209.jpg", ""], ["c01__cluster5__n100.jpg", "Ada"]])
+    rows = faces.read_label_rows(lp)
+    assert [r["size"] for r in rows] == [209, 100]
+    rows = faces.apply_label_edits(rows, {"c00__cluster22__n209.jpg": "  Ben  Lee ",
+                                          "c01__cluster5__n100.jpg": ""})
+    faces.write_label_rows(lp, rows)
+    assert lp.read_text() == "montage,name\nc00__cluster22__n209.jpg,Ben Lee\nc01__cluster5__n100.jpg,\n"
+    assert faces._read_labels(lp) == {22: "Ben Lee"}
+
+
+def test_label_rows_old_format_rewritten_as_montage_name(tmp_path):
+    lp = tmp_path / "labels.csv"
+    _write_labels(lp, ["cluster_id", "size", "montage", "name"],
+                  [["5", "100", "c00__cluster5__n100.jpg", "Ada"]])
+    faces.write_label_rows(lp, faces.read_label_rows(lp))
+    assert lp.read_text() == "montage,name\nc00__cluster5__n100.jpg,Ada\n"
+
+
+def test_apply_label_edits_rejects_unknown_montage_and_semicolon():
+    rows = [{"montage": "c00__cluster5__n100.jpg", "name": "", "size": 100}]
+    for edits in ({"c09__cluster1__n3.jpg": "Ada"}, {"c00__cluster5__n100.jpg": "Ada;Ben"}):
+        try:
+            faces.apply_label_edits(rows, edits)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected ValueError for {edits}")
+
+
+def test_assign_is_stale(tmp_path):
+    import os
+
+    lp, ip = tmp_path / "labels.csv", tmp_path / "image_people.csv"
+    lp.write_text("montage,name\n")
+    assert faces.assign_is_stale(lp, ip)          # never assigned
+    ip.write_text("filename,names\n")
+    os.utime(lp, (1000, 1000))
+    os.utime(ip, (2000, 2000))
+    assert not faces.assign_is_stale(lp, ip)      # assigned after the last edit
+    os.utime(lp, (3000, 3000))
+    assert faces.assign_is_stale(lp, ip)          # names edited since
+
+
 # --- ensure_work_dir (moving the old top-level layout into work/) ----------
 
 def test_ensure_work_dir_moves_old_layout(tmp_path):
