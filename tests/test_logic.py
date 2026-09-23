@@ -381,12 +381,43 @@ def test_recover_unmarks_reembedded_file_in_manifest(tmp_path):
 
 # --- _read_labels ----------------------------------------------------------
 
+def _write_labels(path, header, rows):
+    with path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
+
+
 def test_read_labels_skips_blank_names(tmp_path):
     lp = tmp_path / "labels.csv"
-    with lp.open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["cluster_id", "size", "montage", "name"])
-        w.writerows([["5", "100", "c00.jpg", "Ada"], ["6", "80", "c01.jpg", ""]])
+    _write_labels(lp, ["montage", "name"],
+                  [["c00__cluster22__n209.jpg", ""], ["c01__cluster5__n100.jpg", "Ada"]])
+    assert faces._read_labels(lp) == {5: "Ada"}
+
+
+def test_read_labels_old_four_column_format(tmp_path):
+    lp = tmp_path / "labels.csv"
+    _write_labels(lp, ["cluster_id", "size", "montage", "name"],
+                  [["5", "100", "c00.jpg", "Ada"], ["6", "80", "c01.jpg", ""]])
+    assert faces._read_labels(lp) == {5: "Ada"}
+
+
+def test_read_labels_bad_montage_on_named_row_raises(tmp_path):
+    lp = tmp_path / "labels.csv"
+    _write_labels(lp, ["montage", "name"],
+                  [["c00__cluster22__n209.jpg", ""], ["c01.jpg", "Ada"]])
+    try:
+        faces._read_labels(lp)
+    except ValueError as e:
+        assert "Ada" in str(e) and "c01.jpg" in str(e)
+    else:
+        raise AssertionError("expected ValueError for a named row with no cluster id")
+
+
+def test_read_labels_bad_montage_on_blank_row_is_ignored(tmp_path):
+    lp = tmp_path / "labels.csv"
+    _write_labels(lp, ["montage", "name"],
+                  [["garbled", ""], ["c01__cluster5__n100.jpg", "Ada"]])
     assert faces._read_labels(lp) == {5: "Ada"}
 
 

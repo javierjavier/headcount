@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import re
 import shutil
 import sys
 from collections import deque
@@ -727,7 +728,11 @@ def cmd_review(args) -> int:
     # robust to renumbering — and report the vote purity so any uncertain remap is
     # visible. Falls back to by-id only on a first run with no backup.
     labels_path = Path(args.labels)
-    prior_names = _read_labels(labels_path)
+    try:
+        prior_names = _read_labels(labels_path)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
     remap = None
     if prior_names:
         from common import _unique_path
@@ -755,7 +760,7 @@ def cmd_review(args) -> int:
     kept = set()  # montage filenames written this run, to sweep stale ones below
     with labels_path.open("w", newline="") as lf:
         w = csv.writer(lf)
-        w.writerow(["cluster_id", "size", "montage", "name"])
+        w.writerow(["montage", "name"])
         for rank, (cid, fr) in enumerate(ranked):
             thumbs = crops.get(cid)
             if not thumbs:
@@ -768,7 +773,7 @@ def cmd_review(args) -> int:
                 name, purity, _ = remap.get(cid, ("", None, 0))
             else:
                 name, purity = prior_names.get(cid, ""), None
-            w.writerow([cid, len(fr), montage, name])
+            w.writerow([montage, name])
             report.append((cid, name, purity))
             written += 1
 
@@ -1024,17 +1029,33 @@ def cmd_scene(args) -> int:
     return 0
 
 
+_MONTAGE_CLUSTER = re.compile(r"__cluster(\d+)__")
+
+
 def _read_labels(path: Path) -> dict[int, str]:
-    """cluster_id -> name from labels.csv, skipping rows with no name typed in."""
+    """cluster_id -> name from labels.csv, skipping rows with no name typed in.
+
+    labels.csv is `montage,name`; the cluster id is read from the montage filename
+    `review` wrote (c00__cluster22__n209.jpg -> 22), so the file a person edits has
+    only the two columns they need. The old `cluster_id,size,montage,name` layout
+    still works: a `cluster_id` column wins when present. A named row whose id
+    can't be found raises ValueError rather than silently dropping that name.
+    """
     out: dict[int, str] = {}
     for r in read_face_rows(path):
         name = (r.get("name") or "").strip()
         if not name:
             continue
-        try:
-            out[int(r["cluster_id"])] = name
-        except (KeyError, ValueError):
-            continue
+        cid = (r.get("cluster_id") or "").strip()
+        if not cid:
+            m = _MONTAGE_CLUSTER.search(r.get("montage") or "")
+            if not m:
+                raise ValueError(
+                    f"{path}: can't tell which cluster {name!r} is for — its montage "
+                    f"{r.get('montage')!r} should be a filename from clusters/, like "
+                    f"c00__cluster22__n209.jpg. Fix that row and try again.")
+            cid = m.group(1)
+        out[int(cid)] = name
     return out
 
 
@@ -1130,7 +1151,11 @@ def cmd_assign(args) -> int:
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
-    labels = _read_labels(Path(args.labels))
+    try:
+        labels = _read_labels(Path(args.labels))
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
     if not labels:
         print(f"No names filled into {args.labels} yet — run `review`, then type names.",
               file=sys.stderr)
@@ -1265,7 +1290,11 @@ def cmd_video(args) -> int:
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
-    labels = _read_labels(Path(args.labels))
+    try:
+        labels = _read_labels(Path(args.labels))
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
     if not labels:
         print(f"No names in {args.labels} — run `review`/`assign` first, then label.",
               file=sys.stderr)
@@ -1499,11 +1528,11 @@ def cmd_query(args) -> int:
             print(f"--recovered {args.recovered} needs " + ", ".join(str(p) for p in missing_files)
                   + " — run `cluster`/`review`/`embed` first.", file=sys.stderr)
             return 1
-        cluster_name = {
-            int(r["cluster_id"]): nm
-            for r in read_face_rows(lab_path)
-            if (nm := (r.get("name") or "").strip())
-        }
+        try:
+            cluster_name = _read_labels(lab_path)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 1
         file_of = {r["face_id"]: r["filename"] for r in read_face_rows(faces_path)}
         clustered_names = defaultdict(set)
         for r in read_face_rows(clu_path):

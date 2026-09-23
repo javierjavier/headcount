@@ -145,15 +145,17 @@ c00__cluster22__n209.jpg
  └─ rank 00 = biggest group (montages are sorted biggest first)
 ```
 
-`labels.csv` has one row per montage, and the `montage` column says which image
-the row is for. Look at each montage and type a name after the last comma of its
-row:
+`labels.csv` has one row per montage: the montage filename, then a comma. Look
+at each montage and type a name after the comma of its row:
 
 ```
-cluster_id,size,montage,name
-22,209,c00__cluster22__n209.jpg,
-20,188,c01__cluster20__n188.jpg,ada
+montage,name
+c00__cluster22__n209.jpg,
+c01__cluster20__n188.jpg,ada
 ```
+
+Don't rename the montages or edit the filenames in `labels.csv`: the cluster id
+in the filename is how the tool knows which faces a name belongs to.
 
 - **One child** → their name.
 - **Same child as another montage** → the same name again. One child is often
