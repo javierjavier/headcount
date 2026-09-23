@@ -3065,13 +3065,16 @@ def cmd_serve(args) -> int:
     items: list[dict] = []
     by_key: dict[str, dict] = {}
 
-    def load_gallery() -> dict[int, str]:
+    def load_gallery(people: dict[str, list] | None = None) -> dict[int, str]:
         """Fill items/by_key from image_people.csv and the optional overlays.
-        Returns the hour -> scene map used to tag videos."""
-        people = {
-            r["filename"]: sorted(filter(None, (r.get("names") or "").split(";")))
-            for r in read_face_rows(ip)
-        }
+        Returns the hour -> scene map used to tag videos. *people* overrides
+        image_people.csv (warm_caches passes the photo list with no names)."""
+        final = people is None
+        if final:
+            people = {
+                r["filename"]: sorted(filter(None, (r.get("names") or "").split(";")))
+                for r in read_face_rows(ip)
+            }
 
         # Per-photo face count (how crowded the shot is): the number of faces the
         # detector found, i.e. every faces.csv row for the photo. Powers the gallery's
@@ -3125,7 +3128,7 @@ def cmd_serve(args) -> int:
         vpeople = {}
         vp = Path(args.video_people)
         state["video_stale"] = False
-        if vp.exists():
+        if vp.exists() and final:
             vpeople = {r["filename"]: sorted(filter(None, (r.get("names") or "").split(";")))
                        for r in read_face_rows(vp)}
             # The clips were matched against the names at the time `video` ran; if
@@ -3194,7 +3197,23 @@ def cmd_serve(args) -> int:
     state: dict = {"step": "Starting", "done": 0, "total": 0, "page": None, "error": None,
                    "labeling": need_names, "building": False}
 
+    def warm_caches():
+        """While the labeling page is up, fill the caches for every photo with a
+        face (the same files assign lists in image_people.csv, so the thumbnail
+        keys match) plus the videos, so Done doesn't have to wait for them."""
+        try:
+            load_gallery({fn: [] for fn in read_face_filenames(Path(args.faces))})
+            fill_caches({})
+            print("  thumbnails ready; the gallery will open as soon as you press Done.")
+        except Exception as e:  # noqa: BLE001 — prepare() redoes this after Done
+            print(f"  ! building thumbnails during labeling failed ({e}); will retry after Done.")
+
     def prepare():
+        # warm_caches shares items/by_key and the cache files: let it finish first.
+        # Its progress keeps showing on the preparing page meanwhile.
+        warm = state.get("warm")
+        if warm is not None:
+            warm.join()
         # Names changed since the last `assign` (labeling page, or labels.csv edited
         # by hand): re-run it so the gallery shows them. Same defaults as the command.
         if assign_is_stale(labels_path, ip):
@@ -3206,6 +3225,12 @@ def cmd_serve(args) -> int:
             if cmd_assign(aargs) != 0:
                 raise RuntimeError("assign failed")
         hour_scene = load_gallery()
+        fill_caches(hour_scene)
+        build_page()
+
+    def fill_caches(hour_scene: dict[int, str]):
+        """Thumbnails, capture dates and video lengths for items, all cached on
+        disk. None of it depends on names."""
         state["step"] = "Making thumbnails"
         _build_thumbs(items, album, cache, args.thumb, args.prefetch,
                       progress=lambda d, t: state.update(done=d, total=t))
@@ -3255,6 +3280,7 @@ def cmd_serve(args) -> int:
         for it in items:
             it["d"] = float(durs.get(it["f"], 0.0)) if it["v"] else 0.0
 
+    def build_page():
         all_names = sorted({n for it in items for n in it["n"]})
         # Album-relative parent dir of each item (POSIX, see rel_key) — drives the
         # gallery's per-subfolder filter. Files sitting directly in album/ have no
@@ -3285,8 +3311,10 @@ def cmd_serve(args) -> int:
             state["building"] = False
 
     def start_build():
-        state.update(page=None, error=None, building=True, labeling=False,
-                     step="Starting", done=0, total=0)
+        state.update(page=None, error=None, building=True, labeling=False)
+        warm = state.get("warm")
+        if not (warm and warm.is_alive()):   # else keep showing warm_caches' progress
+            state.update(step="Starting", done=0, total=0)
         threading.Thread(target=prepare_or_report, daemon=True).start()
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -3500,6 +3528,8 @@ def cmd_serve(args) -> int:
     print(f"\n  serving at {url}  (Ctrl-C to stop)\n")
     if need_names:
         print(f"  no names in {labels_path} yet: name the faces in the browser, then press Done.\n")
+        state["warm"] = threading.Thread(target=warm_caches, daemon=True)
+        state["warm"].start()
     else:
         start_build()
     if not args.no_open:

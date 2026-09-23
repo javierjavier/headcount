@@ -82,6 +82,8 @@ python faces.py review
 
 # 4. label — opens a page in the browser that shows each montage and asks who it
 #    is. Type a name or skip; press Done and it builds the gallery (step 7).
+#    The gallery's thumbnails build in the background while you label, so on a
+#    first run most of that wait is over by the time you press Done.
 #    See "Labeling" below the workflow.
 python faces.py serve
 
