@@ -127,8 +127,7 @@ easiest: a name with a space has to be quoted on the command line
 
 You only need to name the children you care about. Names save as you go, so you
 can close the page and come back. To change a name later, or name a group you
-skipped, use **Edit names** in the gallery sidebar. The names are stored in
-`work/labels.csv`.
+skipped, use **Edit names** in the gallery sidebar.
 
 ## The gallery
 
@@ -137,9 +136,8 @@ on this machine only. In the sidebar you can filter by name, date, time of day,
 number of faces and, after `scene` has run, indoor/outdoor. Change names with
 **Edit names**.
 
-The first run decodes every photo again to build thumbnails in
-`work/serve_cache/`. Most of that happens while you name the children, and later
-runs reuse it. If previews look blurry on a Retina screen, restart with a larger
+The first run decodes every photo again to build thumbnails. Most of that
+happens while you name the children, and later runs reuse them. If previews look blurry on a Retina screen, restart with a larger
 `--thumb` (default 768); the cache rebuilds on its own.
 
 **Videos** in `album/` (`.mp4`, `.mov`, `.m4v`, `.webm`, `.avi`, `.mkv`) show in
@@ -229,7 +227,7 @@ See DESIGN.md "Output binning" for how the bins are chosen.
 
 ### `video` — names inside videos
 
-Finds the named children in album videos and writes `work/video_people.csv`.
+Finds the named children in album videos.
 The gallery then shows those names on clips and lets you filter videos by name.
 It samples frames (default 1 per second) and matches each face against the
 groups you've named, so it only works after labeling. Needs ffmpeg. It takes a
@@ -252,7 +250,7 @@ outdoor when its EXIF capture hour falls in the class's scheduled outdoor time.
 It reads only the EXIF header, so it's instant:
 
 ```bash
-python faces.py scene --outdoor-hours 10-11   # -> work/scene.csv
+python faces.py scene --outdoor-hours 10-11
 python faces.py query --with ada --where outdoor
 ```
 
@@ -288,7 +286,7 @@ anchor:
 
 ```bash
 # Drop 5–10 clear photos of one known child into reference/, then:
-python enroll.py --reference reference/        # -> work/reference_embeddings.npy
+python enroll.py --reference reference/
 python faces.py cluster                         # readout: do those faces land
                                                 #   in ONE clean cluster?
 ```
