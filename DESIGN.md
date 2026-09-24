@@ -365,8 +365,12 @@ error (`ArchiveFoundError`), not a silent skip.
 - **A kid split across several clusters** (lighting/age/hair) — expected and
   normal. Handled by **many-to-one labeling**: put the same name on multiple
   clusters. The data model assumes this from the start.
-- **Two similar kids merged into one cluster** — rarer. Re-cluster that cluster
-  at lower `eps`, or split manually. Flag impure clusters during review.
+- **Two similar kids merged into one cluster** — rarer. There is no per-cluster
+  split. Skip the montage when labeling: `assign` treats a skipped cluster's
+  faces like noise, so each one joins whichever child's other named clusters it
+  clearly matches (noise recovery). If neither child has another cluster, re-run
+  `cluster` with a smaller `--min-cluster-size`, which can separate them; `review`
+  carries existing names forward.
 - **Junk faces** — handled by the `cluster` pre-filter (`--min-size`, `--min-det`)
   plus HDBSCAN's noise bucket.
 - **Singletons** (a kid photographed once) — small clusters or noise; still

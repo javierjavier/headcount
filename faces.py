@@ -2175,6 +2175,7 @@ SERVE_PAGE = """<!doctype html>
   </aside>
   <main>
     <div class="topbar">
+    <div class="stale" id="missing" hidden><span id="missingtxt"></span> If you moved or renamed a folder, move it back. Otherwise delete <code>work/</code> and run embed, cluster, review and serve again (this loses the names).</div>
     <div class="stale" id="vstale" hidden>Video names are out of date: names changed since they were found. Run <code>python faces.py video</code> to update them.</div>
     <div class="active" id="active"></div>
     <div class="bar">
@@ -2213,6 +2214,11 @@ SERVE_PAGE = """<!doctype html>
 <script>
 const DATA = __MANIFEST__;
 document.getElementById("vstale").hidden = !DATA.videoStale;
+if (DATA.missing.n) {
+  document.getElementById("missingtxt").textContent =
+    `${DATA.missing.n} photo${DATA.missing.n === 1 ? " is" : "s are"} in the face data but no longer in album/ (e.g. ${DATA.missing.eg}), so ${DATA.missing.n === 1 ? "it isn't" : "they aren't"} shown.`;
+  document.getElementById("missing").hidden = false;
+}
 const S = { names:new Set(), mode:"all", confident:false, fmin:0, fmax:0, hmin:0, hmax:23, dmin:0, dmax:0, scene:"", media:{photo:true, live:true, video:true}, foldersOff:new Set(), foldOpen:false, collapsedDays:new Set(), search:"", sort:"new", nsort:"az", cell:150 };
 // album subfolders present in the data (""=album root). Stored as an *exclude*
 // set so the default (nothing excluded) shows everything and a freshly imported
@@ -3161,6 +3167,14 @@ def cmd_serve(args) -> int:
         # See assign_thumb_keys for why a bare stem isn't always safe with subfolders.
         visible = [(fn, names) for fn, names in sorted(people.items())
                    if (album / fn).exists()]
+        # Photos in the face data whose files are gone, usually because a folder in
+        # album/ was moved or renamed after `embed`. They can't be shown, so say so
+        # instead of leaving them out without a word.
+        missing = sorted(set(people) - {fn for fn, _ in visible})
+        state["missing"] = {"n": len(missing), "eg": missing[0] if missing else ""}
+        if missing:
+            print(f"  ! {len(missing)} photo(s) in the face data are no longer in {album}/ "
+                  f"(e.g. {missing[0]}) and are not shown.")
         # Videos are an additive view layer: the face pipeline ignores them, so they
         # carry no names and are discovered straight from album/ (not image_people).
         video_fns = [] if args.no_videos else [rel_key(p, album) for p in list_videos(album)]
@@ -3305,6 +3319,7 @@ def cmd_serve(args) -> int:
         all_folders = sorted({_subfolder(it["f"]) for it in items})
         manifest = {"names": all_names, "folders": all_folders, "liveMax": args.live_max,
                     "videoStale": state.get("video_stale", False),
+                    "missing": state.get("missing", {"n": 0, "eg": ""}),
                     "confident": state.get("confident", False),
                     "hasScene": state.get("has_scene", False),
                     "items": [{"k": it["k"], "n": it["n"], "r": it["r"], "fc": it["fc"],
