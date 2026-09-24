@@ -9,6 +9,88 @@ below). The *why* — algorithm choices, tradeoffs, hard cases — is in `DESIGN
 
 All face data is biometric and stays local — nothing is committed or uploaded.
 
+New here? Follow **Quick start** below. The sections after it are reference.
+
+## Quick start
+
+### 1. Install (once)
+
+You need macOS or Linux, Python 3 (tested with 3.11 and 3.14), and a C/C++
+compiler.
+
+```bash
+git clone git@github.com:javierjavier/headcount.git
+cd headcount
+xcode-select --install          # macOS only: the compiler; skip if already installed
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Optional: `brew install ffmpeg` gives videos thumbnails and capture dates in the
+gallery.
+
+In every new terminal, run `cd headcount && source .venv/bin/activate` before
+the commands below.
+
+### 2. Add photos
+
+```bash
+mkdir -p album/2026-fall        # any subfolder name
+# copy the photos (and videos) into album/2026-fall/
+```
+
+Or link a folder you already have instead: `ln -s /path/to/photos album`.
+
+- Put each batch in its own subfolder of `album/`.
+- Unzip downloads first. A `.zip` left in `album/` stops the tools with an error.
+- After step 3, don't move or rename folders inside `album/`. Photos are
+  recorded by their path, and moved ones drop out of the gallery (it shows a
+  warning when this happens).
+
+### 3. Run the pipeline
+
+```bash
+python faces.py embed           # finds every face; the slow step
+python faces.py cluster         # groups faces by person
+python faces.py review          # makes one face montage per group
+```
+
+`embed` took 0.5–1 second per photo on an Apple M1 Max: 40 minutes for 4,700
+photos in one album, 16 minutes for 1,060 in another. Expect longer on a slower
+machine; the progress bar shows an estimate once it starts. The first `embed`
+also downloads a ~300 MB face model. If `embed` stops, run it again and it
+continues where it left off.
+
+### 4. Name the children and open the gallery
+
+```bash
+python faces.py serve           # opens http://127.0.0.1:8765
+```
+
+The first time, the browser shows one montage of faces at a time: type the
+child's name, reuse the same name if a child shows up again, and press **Skip**
+for mixed or blurry montages (details in [Labeling](#labeling-step-4)). Press
+**Done** and the gallery opens. After that, `serve` opens the gallery directly.
+Press Ctrl+C in the terminal to stop it.
+
+### 5. Export a child's photos
+
+In the gallery:
+
+1. Tick the child's name.
+2. Tick **confident matches only** (leaves out the less certain matches; see
+   [Sending photos to a parent](#sending-photos-to-a-parent)).
+3. Press **Export zip**. The zip downloads through the browser.
+
+### Later
+
+- **More photos:** put them in a new subfolder of `album/`, then run steps 3 and
+  4 again. Only the new photos go through the slow step, and your names carry over; name
+  any new children with **Edit names** in the gallery.
+- **Done with the album:** see [When you're done](#when-youre-done) to delete
+  the face data.
+
 ## Setup
 
 You need a C/C++ compiler: `insightface` ships only as source, so pip builds it
@@ -61,11 +143,11 @@ first run moves them into `work/` and prints what it moved.
 
 Put all the photos in `album/` (any Pillow-readable format, see Setup), or
 symlink a folder there: `ln -s /path/to/photos album`. Then run three commands
-and open the gallery:
+and `serve`:
 
 ```bash
-# 1. embed — find and embed every face. Slow (about 40 min for 4.7k photos) and
-#    done once; if it stops, running it again picks up where it left off.
+# 1. embed — find and embed every face. Slow (0.5–1 s per photo on an M1 Max)
+#    and done once; if it stops, running it again picks up where it left off.
 python faces.py embed
 
 # 2. cluster — group faces by who they look like. Fast; safe to re-run.
@@ -193,7 +275,8 @@ To look through the left-out photos before deciding, use
 
 ### Speed & adding photos
 
-`embed` is the only slow step (~40 min for ~4.7k photos on an M1 Max, runs cool);
+`embed` is the only slow step (~40 min for ~4.7k photos on an M1 Max, runs cool;
+a 1,060-photo album took 16 min on the same chip);
 everything downstream is seconds. Per image the cost splits roughly in half
 between decoding the 24 MP HEIC (single-threaded, via libheif) and running
 detection + recognition. That 50/50 split is the HEIC worst case: a non-HEIC
