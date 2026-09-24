@@ -319,12 +319,12 @@ date. Running `video` again re-scans every clip with the new names.
 ### Indoor / outdoor (`scene`)
 
 Optional location dimension. The gallery shows its **Scene** filter only after
-`scene` has run; the time-of-day filter works without it. If the album's GPS is
-stripped but the daily schedule is rigid (e.g. an outdoor block at a fixed hour),
-classify by EXIF time — instant, no decode:
+`scene` has run; the time-of-day filter works without it. `scene` tags a photo
+outdoor when its EXIF capture hour falls in the class's scheduled outdoor time.
+It reads only the EXIF header, so it's instant:
 
 ```bash
-python faces.py scene --method time --outdoor-hours 10-11   # -> scene.csv
+python faces.py scene --outdoor-hours 10-11   # -> work/scene.csv
 python faces.py query --with ada --where outdoor
 ```
 
@@ -342,9 +342,14 @@ batches' rows untouched:
 python faces.py scene --subdir 20260618 --outdoor-hours 13-14   # only that batch
 ```
 
-A foliage/sky colour method (`--method green`) also exists, but green classroom
-decor (a leafy rug, a green wall) makes it leak ~20%; time wins for this album.
-See `DESIGN.md` / commit history.
+For a folder that should always be one scene regardless of the hour, such as a
+field trip, list it in `work/scene_overrides.csv`. Every `scene` run applies it,
+so it survives full re-runs:
+
+```
+subdir,scene
+2026-10-03 zoo trip,outdoor
+```
 
 ### Calibration (`enroll.py`) — optional, for a new album
 

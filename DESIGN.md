@@ -307,11 +307,13 @@ Three things needed handling that photos didn't:
 
 ## Scene tagging: the time window and per-folder overrides
 
-`scene` defaults to `--method time`: a photo is `outdoor` iff its EXIF capture
-hour falls in `--outdoor-hours` (default `10-11`, the daily outdoor block). This
-beats the pixel (`green`) method on the regular album because green classroom
-decor reads as foliage and leaks false "outdoor"; the rigid daily schedule is a
-cleaner signal than the pixels. The window is **one value per run**, applied to
+`scene` tags a photo `outdoor` iff its EXIF capture hour falls in
+`--outdoor-hours` (default `10-11`, the daily outdoor block). A pixel method
+(share of green foliage and blue sky pixels) also existed and was removed: green
+classroom decor read as foliage and leaked ~20% false "outdoor", and the one case
+a schedule can't cover, a field trip, is a whole folder that
+`scene_overrides.csv` (below) tags directly. Most schools have a fixed
+indoor/outdoor schedule, which is a cleaner signal than the pixels. The window is **one value per run**, applied to
 every photo — what varies per photo is its capture hour, compared against that
 window.
 
@@ -325,7 +327,7 @@ invisible — the EXIF hour column still read `16`, because that hour is re-read
 from the photo every run; only the *verdict* had flipped.)
 
 `scene_overrides.csv` (CSV: `subdir,scene`) makes per-folder scene **durable**.
-Every `scene` run applies it *after* time/green classification, so a listed
+Every `scene` run applies it *after* the hour classification, so a listed
 folder is forced to its tag (`indoor`/`outdoor`) regardless of the window and
 survives full re-runs. Longest matching prefix wins (a nested override beats a
 broader one); the match is prefix-on-`subdir/` so a sibling sharing a date

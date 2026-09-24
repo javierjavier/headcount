@@ -28,8 +28,8 @@ Phases:
           present), `--any`, `--without`, `--only`, into query/<expr>/.
           `--where indoor|outdoor` adds a location filter (needs `scene`).
 
-  scene   Tag each photo indoor/outdoor by EXIF capture hour (default) or
-          foliage+sky colour -> scene.csv, and print the hour cross-tab so it can be checked against the schedule.
+  scene   Tag each photo indoor/outdoor by EXIF capture hour -> scene.csv,
+          and print the hour cross-tab so it can be checked against the schedule.
 
   video   Name the faces inside album videos against the labeled photo clusters
           -> video_people.csv. Re-scans everything when the names change.
@@ -824,20 +824,6 @@ def cmd_review(args) -> int:
     return 0
 
 
-def _scene_stats(im):
-    """(green, sky, bright) fractions from a downscaled RGB image.
-
-    Outdoor play means grass/trees (green) and sky (blue) — strong, cheap signals
-    that an indoor classroom lacks. Brightness alone misfires (a bright window-lit
-    circle time reads 'outdoor'), so foliage+sky is the reliable cue.
-    """
-    a = np.asarray(im.resize((64, 64))).astype(np.float32)
-    R, G, B = a[..., 0], a[..., 1], a[..., 2]
-    green = float(((G > R + 8) & (G > B + 8) & (G > 50)).mean())
-    sky = float(((B > R + 10) & (B > G + 5) & (B > 110)).mean())
-    return green, sky, float(a.mean() / 255)
-
-
 def _exif_dt(path: Path) -> str:
     """Raw EXIF capture datetime 'YYYY:MM:DD HH:MM:SS', or '' if missing.
 
@@ -895,7 +881,7 @@ def _load_scene_overrides(path: Path) -> list:
     """Read scene_overrides.csv -> [(prefix, scene), ...], longest prefix first.
 
     Each row (subdir,scene) forces every photo under album/<subdir>/ to a fixed
-    indoor/outdoor value. Applied AFTER the time/green classification on *every*
+    indoor/outdoor value. Applied AFTER the hour classification on *every*
     scene run, so a folder whose schedule doesn't match the global --outdoor-hours
     window (e.g. an all-outdoor graduation shot at 4pm) keeps its tag across full
     re-runs instead of silently reverting to the window's verdict. Longest matching
@@ -961,57 +947,31 @@ def cmd_scene(args) -> int:
     new_rows = []   # full csv rows just classified
     summary = []    # (hour, scene) for the by-hour readout
 
-    # 'time' needs no pixels — just the EXIF hour — so it skips decode entirely
-    # (instant). 'green' and 'both' decode for the foliage/sky colour signal.
-    # 'both' = outdoor only if the colour says so AND it's in the outdoor window
-    # (rejects green classroom decor at non-outdoor hours).
-    if args.method == "time":
-        seq = images
-        try:
-            from tqdm import tqdm
-            seq = tqdm(images, unit="img", desc="scene(time)")
-        except ImportError:
-            pass
-        for path in seq:
-            hr = _exif_hour(path)
-            fn = rel_key(path, album)
-            scene = "outdoor" if hr in hours else "indoor"
-            ov = _override_scene(fn, overrides)
-            if ov:
-                forced += ov != scene
-                scene = ov
-            new_rows.append([fn, str(hr), "", "", "", scene])
-            summary.append((hr, scene))
-    else:
-        stream = _prefetch(images, args.prefetch, loader=_decode_pil)
-        try:
-            from tqdm import tqdm
-            stream = tqdm(stream, total=len(images), unit="img", desc="scene")
-        except ImportError:
-            pass
-        for path, im in stream:
-            if isinstance(im, Exception):
-                continue
-            g, s, b = _scene_stats(im)
-            hr = _exif_hour(path)
-            fn = rel_key(path, album)
-            green_out = (g + s) >= args.thresh
-            out_flag = (green_out and hr in hours) if args.method == "both" else green_out
-            scene = "outdoor" if out_flag else "indoor"
-            ov = _override_scene(fn, overrides)
-            if ov:
-                forced += ov != scene
-                scene = ov
-            new_rows.append([fn, str(hr), f"{g:.3f}", f"{s:.3f}", f"{b:.3f}", scene])
-            summary.append((hr, scene))
+    # Only the EXIF header is read, no pixel decode, so this is instant. A colour
+    # (foliage/sky) method was tried and removed; see DESIGN.md.
+    seq = images
+    try:
+        from tqdm import tqdm
+        seq = tqdm(images, unit="img", desc="scene")
+    except ImportError:
+        pass
+    for path in seq:
+        hr = _exif_hour(path)
+        fn = rel_key(path, album)
+        scene = "outdoor" if hr in hours else "indoor"
+        ov = _override_scene(fn, overrides)
+        if ov:
+            forced += ov != scene
+            scene = ov
+        new_rows.append([fn, str(hr), scene])
+        summary.append((hr, scene))
 
-    header = ["filename", "hour", "green", "sky", "bright", "scene"]
+    header = ["filename", "hour", "scene"]
     note = ""
     if args.subdir and out.exists():
-        with out.open() as f:
-            rd = csv.reader(f)
-            next(rd, None)
-            existing = [r for r in rd if r]
+        # Read by column name: files written before the colour method was removed
+        # also have green/sky/bright columns, which are dropped here.
+        existing = [[r["filename"], r["hour"], r["scene"]] for r in read_face_rows(out)]
         final_rows = merge_scene_rows(existing, new_rows)
         note = f" (merged batch into {len(final_rows)} total rows)"
     else:
@@ -3717,15 +3677,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_qry.add_argument("--dry-run", action="store_true", help="list matches, don't write files")
     p_qry.set_defaults(func=cmd_query)
 
-    p_scn = sub.add_parser("scene", help="tag each photo indoor/outdoor (EXIF hour or foliage+sky) -> scene.csv")
+    p_scn = sub.add_parser("scene", help="tag each photo indoor/outdoor by EXIF hour -> scene.csv")
     p_scn.add_argument("--album", default="album", help="album folder (default: album/)")
     p_scn.add_argument("--faces", default=f"{WORK}/faces.csv", help="limit to images in this face table ('' = all)")
     p_scn.add_argument("--out", default=f"{WORK}/scene.csv", help="scene index output (default: work/scene.csv)")
-    p_scn.add_argument("--method", choices=["green", "time", "both"], default="time",
-                       help="time=hour window (default; instant, no decode, best when the "
-                            "daily schedule is rigid), green=foliage/sky colour, both=AND")
     p_scn.add_argument("--outdoor-hours", default="10-11",
-                       help="outdoor hour window for time/both, e.g. 10-11 (default: 10-11)")
+                       help="outdoor hour window, e.g. 10-11 (default: 10-11)")
     p_scn.add_argument("--overrides", default=f"{WORK}/scene_overrides.csv",
                        help="per-folder scene overrides (CSV: subdir,scene) applied "
                             "after classification; forces off-schedule folders (e.g. a "
@@ -3735,10 +3692,7 @@ def build_parser() -> argparse.ArgumentParser:
                             "scene.csv, keeping other batches' rows. Use when an import's "
                             "outdoor block differs from earlier ones (e.g. --subdir 20260618 "
                             "--outdoor-hours 13-14).")
-    p_scn.add_argument("--thresh", type=float, default=0.12,
-                       help="green+sky fraction >= this is outdoor (default: 0.12)")
     p_scn.add_argument("--limit", type=int, default=0, help="only first N images (for testing)")
-    p_scn.add_argument("--prefetch", type=int, default=4, help="background decode threads (default: 4)")
     p_scn.set_defaults(func=cmd_scene)
 
     p_vid = sub.add_parser("video",

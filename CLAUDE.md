@@ -3,7 +3,7 @@
 `headcount` — sorts a class photo album by who's in each picture, locally. See
 `README.md` for the workflow and `DESIGN.md` for the *why* (algorithm choices,
 tradeoffs, hard cases). **Read `DESIGN.md` before changing pipeline behavior** —
-most non-obvious choices (threshold, recovery, time-vs-green scene tagging) are
+most non-obvious choices (threshold, recovery, hour-based scene tagging) are
 deliberate and explained there.
 
 ## Privacy invariant (non-negotiable)
