@@ -51,13 +51,16 @@ Or link a folder you already have instead: `ln -s /path/to/photos album`.
 ### 3. Run the pipeline
 
 ```bash
-python faces.py embed           # finds every face; slow (~40 min per 4,700 photos)
+python faces.py embed           # finds every face; the slow step
 python faces.py cluster         # groups faces by person
 python faces.py review          # makes one face montage per group
 ```
 
-The first `embed` also downloads a ~300 MB face model. If `embed` stops, run it
-again and it continues where it left off.
+`embed` took 0.5–1 second per photo on an Apple M1 Max: 40 minutes for 4,700
+photos in one album, 16 minutes for 1,060 in another. Expect longer on a slower
+machine; the progress bar shows an estimate once it starts. The first `embed`
+also downloads a ~300 MB face model. If `embed` stops, run it again and it
+continues where it left off.
 
 ### 4. Name the children and open the gallery
 
@@ -143,8 +146,8 @@ symlink a folder there: `ln -s /path/to/photos album`. Then run three commands
 and `serve`:
 
 ```bash
-# 1. embed — find and embed every face. Slow (about 40 min for 4.7k photos) and
-#    done once; if it stops, running it again picks up where it left off.
+# 1. embed — find and embed every face. Slow (0.5–1 s per photo on an M1 Max)
+#    and done once; if it stops, running it again picks up where it left off.
 python faces.py embed
 
 # 2. cluster — group faces by who they look like. Fast; safe to re-run.
@@ -272,7 +275,8 @@ To look through the left-out photos before deciding, use
 
 ### Speed & adding photos
 
-`embed` is the only slow step (~40 min for ~4.7k photos on an M1 Max, runs cool);
+`embed` is the only slow step (~40 min for ~4.7k photos on an M1 Max, runs cool;
+a 1,060-photo album averaging ~4 faces per photo took 16 min on the same chip);
 everything downstream is seconds. Per image the cost splits roughly in half
 between decoding the 24 MP HEIC (single-threaded, via libheif) and running
 detection + recognition. That 50/50 split is the HEIC worst case: a non-HEIC
