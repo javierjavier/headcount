@@ -47,8 +47,15 @@ album/ ──embed──▶ faces.npy + faces.csv ──cluster──▶ cluster
 Like today's `scan`, but stores *every* face, not just the best score per image.
 Implemented as `faces.py embed`. Speed comes from `--prefetch` (overlapping the
 single-threaded HEIC decode with inference on background threads, ~1.4–1.5× on an
-M1). Multi-process sharding was tried and measured at ~1.0× on a single machine,
-so it was dropped — see the README's "Speed & adding photos" note.
+M1). Per image the cost splits roughly in half between decoding the 24 MP HEIC
+(single-threaded, via libheif) and detection + recognition; other formats decode
+through their own Pillow codec (e.g. libjpeg), which is usually cheaper.
+Multi-process sharding over disjoint slices was tried and measured at ~1.0× on a
+single machine: one onnxruntime process plus the OS scheduler already
+oversubscribe the cores. It was removed rather than left in as a tempting
+non-speedup. Every image gets its EXIF orientation applied before detection
+(`common.py`); portrait phone shots would otherwise go in sideways and fail to
+detect.
 
 - `faces.npy` — `M × 512` array of L2-normalized embeddings.
   M ≈ 25–40k faces for this album; ~80 MB. Trivial.
@@ -120,8 +127,12 @@ mislabels. Instead `cluster` snapshots the prior membership (`clusters.csv.bak`)
 and `review` re-attaches each name by **face_id majority vote**: face_id is stable
 across re-embeds, so for each new cluster we look at what its member faces were
 named before and take the majority, reporting the vote purity so any uncertain
-remap is visible. This is the identity-stable version of the carry-forward — see
-`remap_labels_by_face_id`.
+remap is visible: it prints how many names it carried and flags any cluster
+whose vote agreement is under 90%. A first run with no backup falls back to the
+by-id carry. This is the identity-stable version of the carry-forward — see
+`remap_labels_by_face_id`. Hand edits to `labels.csv` must keep the montage
+filenames, since the cluster id is read from them; `serve` picks edits up on
+its next start.
 
 ### 4. `assign` — fast export (reuses `collect` copy logic)
 

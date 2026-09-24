@@ -29,9 +29,9 @@ how long it takes.
    After about a minute, read the progress bar and give the user the ETA. When
    it finishes, run `cluster` and `review`.
 4. **Name the children (user acts).** Run `serve` in the background and check
-   that 127.0.0.1:8765 answers. Summarize the README *Labeling* rules (name
-   your child, reuse the exact spelling, Skip everything else, press Done) and
-   wait for the user to say they are done.
+   that 127.0.0.1:8765 answers. Summarize the README *Naming the children*
+   rules (name your child, reuse the exact spelling, Skip everything else, press
+   Done) and wait for the user to say they are done.
 5. **Export (user chooses).** Read the named rows of `work/labels.csv`. If
    there is more than one name, show photo counts per name
    (`query --with <name> --dry-run`) and ask which child. Offer the gallery's
