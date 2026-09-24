@@ -6,6 +6,9 @@ tradeoffs, hard cases). **Read `DESIGN.md` before changing pipeline behavior** â
 most non-obvious choices (threshold, recovery, hour-based scene tagging) are
 deliberate and explained there.
 
+To run the tool for someone (install, add photos, run the pipeline, open the
+gallery, export), follow README.md *Quick start*.
+
 ## Privacy invariant (non-negotiable)
 
 All face data is biometric, and the album is a child's photos. **Never commit**
