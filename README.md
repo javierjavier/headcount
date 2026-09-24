@@ -318,9 +318,10 @@ date. Running `video` again re-scans every clip with the new names.
 
 ### Indoor / outdoor (`scene`)
 
-Optional location dimension. If the album's GPS is stripped but the daily
-schedule is rigid (e.g. an outdoor block at a fixed hour), classify by EXIF
-time — instant, no decode:
+Optional location dimension. The gallery shows its **Scene** filter only after
+`scene` has run; the time-of-day filter works without it. If the album's GPS is
+stripped but the daily schedule is rigid (e.g. an outdoor block at a fixed hour),
+classify by EXIF time — instant, no decode:
 
 ```bash
 python faces.py scene --method time --outdoor-hours 10-11   # -> scene.csv

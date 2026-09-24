@@ -2188,7 +2188,7 @@ SERVE_PAGE = """<!doctype html>
       <input type="range" id="hmax" step="1">
     </div>
     <div class="hourlab" id="hourlab"></div>
-    <h2>Scene</h2>
+    <h2 id="sceneh">Scene</h2>
     <select id="scene">
       <option value="">Any</option>
       <option value="indoor">Indoor</option>
@@ -2306,7 +2306,7 @@ function loadState() {
   if (typeof v.dlo === "string") { const i = DAYS.indexOf(v.dlo); if (i >= 0) S.dmin = i; }   // re-anchor by day
   if (typeof v.dhi === "string") { const i = DAYS.indexOf(v.dhi); if (i >= 0) S.dmax = i; }
   if (S.dmin > S.dmax) { S.dmin = DMIN; S.dmax = DMAX; }
-  if (v.scene === "indoor" || v.scene === "outdoor") S.scene = v.scene;
+  if (DATA.hasScene && (v.scene === "indoor" || v.scene === "outdoor")) S.scene = v.scene;
   if (v.media && typeof v.media === "object") {
     for (const k of ["photo", "live", "video"]) if (typeof v.media[k] === "boolean") S.media[k] = v.media[k];
   }
@@ -2742,6 +2742,7 @@ if (FCMIN === FCMAX) {
 $("confwrap").hidden = !DATA.confident;
 $("confident").checked = S.confident;
 $("confident").onchange = e => { S.confident = e.target.checked; render(); };
+if (!DATA.hasScene) { $("sceneh").style.display = "none"; $("scene").style.display = "none"; }
 $("scene").value = S.scene;
 $("scene").onchange = e => { S.scene = e.target.value; render(); };
 for (const cb of document.querySelectorAll('#media input[type=checkbox]')) {
@@ -3168,6 +3169,9 @@ def cmd_serve(args) -> int:
                 if sc and h is not None:
                     votes[h][sc] += 1
             hour_scene = {h: c.most_common(1)[0][0] for h, c in votes.items()}
+        # Without a `scene` pass there are no indoor/outdoor tags; the page hides
+        # the Scene filter rather than show one that matches everything.
+        state["has_scene"] = any(scenes.values())
 
         # Optional video-name overlay — present iff a `video` pass has been run, so
         # clips get the same name filter/caption treatment as photos.
@@ -3304,9 +3308,10 @@ def cmd_serve(args) -> int:
             dates_path.write_text(json.dumps(dates))
         for it in items:
             it["dt"] = dates.get(it["f"], "")
-            # Videos have no scene.csv hour; derive it from the capture time so the
-            # time-of-day filter applies to them just like photos.
-            if it["v"] and it["dt"]:
+            # The time-of-day filter needs an hour. scene.csv has one for photos only
+            # when a `scene` pass has been run, and never for videos, so fall back to
+            # the capture time read above.
+            if it["h"] is None and it["dt"]:
                 h = _hour_from_dt(it["dt"])
                 if h >= 0:
                     it["h"] = h
@@ -3341,6 +3346,7 @@ def cmd_serve(args) -> int:
         manifest = {"names": all_names, "folders": all_folders, "liveMax": args.live_max,
                     "videoStale": state.get("video_stale", False),
                     "confident": state.get("confident", False),
+                    "hasScene": state.get("has_scene", False),
                     "items": [{"k": it["k"], "n": it["n"], "r": it["r"], "fc": it["fc"],
                                "h": it["h"], "s": it["s"], "sf": _subfolder(it["f"]),
                                "dt": it["dt"], "v": 1 if it["v"] else 0,
