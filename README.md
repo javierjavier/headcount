@@ -276,7 +276,7 @@ To look through the left-out photos before deciding, use
 ### Speed & adding photos
 
 `embed` is the only slow step (~40 min for ~4.7k photos on an M1 Max, runs cool;
-a 1,060-photo album averaging ~4 faces per photo took 16 min on the same chip);
+a 1,060-photo album took 16 min on the same chip);
 everything downstream is seconds. Per image the cost splits roughly in half
 between decoding the 24 MP HEIC (single-threaded, via libheif) and running
 detection + recognition. That 50/50 split is the HEIC worst case: a non-HEIC
