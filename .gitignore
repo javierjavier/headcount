@@ -1,8 +1,9 @@
 # Photo data — never commit (huge, and contains a child's face/GPS data)
-album/
+# no trailing slash: also matches album and reference when they are symlinks (README suggests one)
+album
 matches/
 *-matches/
-reference/
+reference
 known-positives/
 
 # Everything generated from the album (face data, montages, names, thumbnails)

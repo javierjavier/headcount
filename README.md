@@ -9,7 +9,15 @@ below). The *why* — algorithm choices, tradeoffs, hard cases — is in `DESIGN
 
 All face data is biometric and stays local — nothing is committed or uploaded.
 
-New here? Follow **Quick start** below. The sections after it are reference.
+New here? Pick one:
+
+- **Guided setup:** open this folder in [Claude Code](https://claude.com/claude-code)
+  and say "set this up for me". It installs everything, asks where your photos
+  are, runs each step, and tells you when it needs you (naming the children,
+  choosing whose photos to export).
+- **By hand:** follow **Quick start** below.
+
+The sections after Quick start are reference.
 
 ## Quick start
 
@@ -41,6 +49,8 @@ mkdir -p album/2026-fall        # any subfolder name
 ```
 
 Or link a folder you already have instead: `ln -s /path/to/photos album`.
+Link it as `album` itself, not as a subfolder inside `album/`: the scan skips
+links inside `album/`, so none of those photos get processed.
 
 - Put each batch in its own subfolder of `album/`.
 - Unzip downloads first. A `.zip` left in `album/` stops the tools with an error.
